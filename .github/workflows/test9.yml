@@ -1,59 +1,51 @@
-name: test9-final-sweep
+name: test9-relay-final
 on: {workflow_dispatch: {}}
 jobs:
-  sweep:
+  check:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 10
     steps:
-      - name: sweep
+      - name: relay-and-last-stones
         shell: bash
         run: |
           set +e
           UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"
 
-          echo "=== ۱) کلید رله: t.me/s باز است؟ ==="
-          code=$(curl -s -o /tmp/tg.html -A "$UA" --max-time 15 -w "%{http_code}" "https://t.me/s/telegram" 2>/dev/null)
-          echo "  t.me/s/telegram => ${code:-000} | بلاک‌های پیام: $(grep -o 'class="tgme_widget_message_text"' /tmp/tg.html 2>/dev/null | wc -l)"
-
-          echo ""
-          echo "=== ۲) سایت‌های تست‌نشده ==="
-          for u in "https://www.ifb.ir/" "https://bestamooz.com/" "https://sahmplus.com/" \
-                   "https://tahlilbazaar.com/" "https://bourseview.com/" "https://www.irbourse.com/" \
-                   "https://www.boursenews.ir/" "https://www.sahmefarda.ir/" \
-                   "https://xzn.ir/" "https://ultraweb.ir/" ; do
-            rm -f /tmp/p.html
-            c=$(curl -sL -o /tmp/p.html -A "$UA" --max-time 12 -w "%{http_code}" "$u" 2>/dev/null)
-            f=$(grep -o 'فولاد' /tmp/p.html 2>/dev/null | wc -l)
-            echo "  $u => ${c:-000} ($(wc -c < /tmp/p.html 2>/dev/null || echo 0)B | فولاد:$f)"
+          echo "=== ۱) کلید رله: t.me/s از Actions باز است؟ ==="
+          for ch in telegram durov; do
+            code=$(curl -sL -A "$UA" --max-time 15 -o /tmp/t.html -w "%{http_code}" "https://t.me/s/$ch" 2>/dev/null)
+            [ -z "$code" ] && code=000
+            n=$(grep -o 'tgme_widget_message_text' /tmp/t.html 2>/dev/null | wc -l)
+            echo "  t.me/s/$ch => $code | بلوک‌های پیام: $n"
           done
+          echo "  (عدد بالای ~۵ = کانال‌ها از Actions قابل خواندن‌اند ✅)"
 
           echo ""
-          echo "=== ۳) کالبدشکافی عمیق مفید (۷۴۲KB) ==="
+          echo "=== ۲) آخرین سنگ: صفحه ۷۴۲KB مفید ==="
           curl -sL -A "$UA" --max-time 30 "https://www.emofid.com/market-watch/" -o /tmp/mf.html 2>/dev/null
+          echo "  حجم: $(wc -c < /tmp/mf.html 2>/dev/null) بایت"
           python3 - <<'PY'
           import re
           h = open('/tmp/mf.html', encoding='utf-8', errors='ignore').read()
-          print(f"  حجم خام: {len(h)//1024}KB")
-          esc = r"\u0641\u0648\u0644\u0627\u062F"
-          print(f"  یونیکد اسکیپ «فولاد»: {h.count(esc)} بار")
-          for k in ("insCode","insId","lVal18AFC","pClosing","priceLast","zTotTran","marketWatch","stocks"):
-              print(f"  کلید {k}: {h.count(k)} بار")
-          txt = re.sub(r'<[^>]+>', ' ', h)
-          txt = re.sub(r'\s+', ' ', txt)
-          for s in ("فولاد","شستا","شپنا","فملی"):
-              print(f"  متن بی‌تگ «{s}»: {txt.count(s)} بار")
-          i = txt.find("فولاد")
-          if i >= 0: print("  بافت:", txt[max(0,i-150):i+250][:400])
-          scripts = re.findall(r'<script[^>]*>(.*?)</script>', h, re.S)
-          if scripts:
-              big = max(scripts, key=len)
-              print(f"  بزرگ‌ترین <script>: {len(big)//1024}KB | شامل فولاد: {big.count('فولاد')}")
+          esc = '\\u0641\\u0648\\u0644\\u0627\\u062f'   # «فولاد» به‌صورت یونیکد-اسکیپ
+          print(f"  فولاد یونیکد-اسکیپ: {h.count(esc)} بار")
+          for k in ("insCode","lVal18AFC","pClosing","marketWatch","instrument"):
+              print(f"  کلید «{k}»: {h.count(k)} بار")
+          ss = re.findall(r'<script[^>]*>(.*?)</script>', h, re.S)
+          if ss:
+              b = max(ss, key=len)
+              print(f"  بزرگ‌ترین <script>: {len(b)//1024}KB | فولاد در آن: {b.count('فولاد')}")
           PY
 
           echo ""
-          echo "=== ۴) Wayback: تازه‌ترین اسنپ‌شات TSETMC ==="
-          curl -s --max-time 15 "http://archive.org/wayback/available?url=www.tsetmc.com" 2>/dev/null
-          echo
+          echo "=== ۳) چهار سایت تست‌نشده ==="
+          for u in "https://www.ifb.ir/" "https://tahlilbazaar.com/" "https://www.sahmplus.com/" "https://www.sahmexpert.com/"; do
+            rm -f /tmp/s.html
+            c=$(curl -sL -A "$UA" --max-time 12 -o /tmp/s.html -w "%{http_code}" "$u" 2>/dev/null)
+            [ -z "$c" ] && c=000
+            f=$(grep -o 'فولاد' /tmp/s.html 2>/dev/null | wc -l)
+            echo "  $u => $c | فولاد: $f | حجم: $(wc -c < /tmp/s.html 2>/dev/null)"
+          done
 
           echo ""
           echo "=== END ==="
