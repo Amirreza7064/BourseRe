@@ -1,0 +1,33 @@
+name: test8-light-touch
+on: {workflow_dispatch: {}}
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: light-touch
+        shell: bash
+        run: |
+          set +e
+          UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"
+          echo "=== آزمون کلیدی: کل بازار در یک درخواست ==="
+          for i in 1 2 3 4; do
+            rm -f /tmp/mw.txt
+            code=$(curl -s --compressed -o /tmp/mw.txt -A "$UA" --max-time 30 -w "%{http_code}" "http://old.tsetmc.com/tsev2/data/MarketWatchPlus.aspx" 2>/dev/null)
+            sz=$(wc -c < /tmp/mw.txt 2>/dev/null)
+            echo "تلاش $i => code=${code:-000} | حجم=${sz:-0}"
+            if [ "${code:-}" = "200" ] && [ "${sz:-0}" -gt 100000 ]; then
+              echo "🎁 موفق! ۴۰۰ کاراکتر اول:"
+              head -c 400 /tmp/mw.txt; echo
+              echo "خط نمونه فولاد:"
+              grep -m1 -o '.\{0,80\}فولاد.\{0,400\}' /tmp/mw.txt | head -c 600; echo
+              break
+            fi
+            sleep 20
+          done
+          code=$(curl -sk --compressed -o /tmp/mw2.txt -A "$UA" --max-time 30 -w "%{http_code}" "https://old.tsetmc.com/tsev2/data/MarketWatchPlus.aspx" 2>/dev/null)
+          echo "نسخه https => code=${code:-000} | حجم=$(wc -c < /tmp/mw2.txt 2>/dev/null)"
+          echo "=== پلن B: TGJU جدول سهام دارد؟ ==="
+          curl -sL --compressed -A "$UA" --max-time 25 "https://www.tgju.org/stock" -o /tmp/tjs.html 2>/dev/null
+          echo "حجم: $(wc -c < /tmp/tjs.html 2>/dev/null) | فولاد: $(grep -o 'فولاد' /tmp/tjs.html 2>/dev/null | wc -l)"
+          echo "=== END ==="
