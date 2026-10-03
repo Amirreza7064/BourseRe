@@ -1,0 +1,57 @@
+name: test3-endpoints
+on: {workflow_dispatch: {}}
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: probe-and-mine
+        shell: bash
+        run: |
+          UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"
+
+          probe () {
+            code=$(curl -sL -o /tmp/b -A "$UA" --max-time 12 -w "%{http_code}" "$1" 2>/dev/null || echo 000)
+            echo "### $1"
+            echo "    => $code | $(wc -c < /tmp/b) bytes"
+            head -c 120 /tmp/b | tr '\n\r' '  '; echo; echo
+          }
+
+          echo "=========== A) پروب endpointهای احتمالی ==========="
+          probe "https://rahavard365.com/api/search?text=%D9%81%D9%88%D9%84%D8%A7%D8%AF"
+          probe "https://rahavard365.com/api/v1/search?text=%D9%81%D9%88%D9%84%D8%A7%D8%AF"
+          probe "https://api.emofid.com/api/v2/stocks"
+          probe "https://api.emofid.com/api/v2/market-watch"
+          probe "https://api.agah.com/v1/market-watch"
+          probe "https://agah.com/api/v1/market-watch"
+          probe "https://online.agah.com/"
+          probe "https://call.tgju.org/ajax.json"
+          probe "https://www.tse.ir/"
+          probe "https://sahmad.com/"
+
+          echo "=========== B) معدن‌کاوی API از باندل‌های JS ==========="
+          mine () {
+            site="$1"
+            curl -sL -A "$UA" --max-time 25 "$site" -o /tmp/page.html 2>/dev/null
+            echo "== $site  ($(wc -c < /tmp/page.html) bytes)"
+            for js in $(grep -oE '(src|href)="[^"]+\.js[^"]*"' /tmp/page.html \
+                        | sed -E 's/^(src|href)="//; s/".*$//' | sort -u | head -4); do
+              case "$js" in
+                http*) : ;;
+                /*)    js="${site%/}$js" ;;
+                *)     js="${site%/}/$js" ;;
+              esac
+              curl -sL -A "$UA" --max-time 25 "$js" -o /tmp/app.js 2>/dev/null
+              sz=$(wc -c < /tmp/app.js)
+              [ "$sz" -lt 2000 ] && continue
+              echo "   JS: $js ($sz bytes)"
+              grep -oiE '"[^"]{0,50}api[^"]{0,70}"' /tmp/app.js | sort -u | head -12 | sed 's/^/     API: /'
+              grep -oE '"/[a-zA-Z0-9_/.-]{4,60}"' /tmp/app.js \
+                | grep -iE 'market|watch|instrument|stock|symbol|search|candle|price|ticker' \
+                | sort -u | head -12 | sed 's/^/     PATH: /'
+            done
+            echo
+          }
+
+          mine "https://rahavard365.com/"
+          mine "https://www.emofid.com/market-watch/"
+          mine "https://agah.com/"
