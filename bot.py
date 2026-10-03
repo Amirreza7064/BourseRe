@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
-"""فایل: bot.py — سرخطی بورس (تیتر + لینک) + غربالگری روزانه
-اجرا: GitHub Actions → daily-scan"""
+"""فایل: bot.py — سرخطی بورس (صبح) + غربالگری روزانه (بعد بازار)
+اجرا: GitHub Actions → daily-scan | حالت اجرا با متغیر RUN_MODE کنترل می‌شود"""
 
 import os, re, html, time
 import requests
@@ -12,24 +12,25 @@ BALE_CHAT_ID = os.environ["BALE_CHAT_ID"]
 API_URL = f"https://tapi.bale.ai/bot{BALE_TOKEN}/sendMessage"
 UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"}
 
-SOURCE        = "filterBourseUniversity"
-TOP_N         = 25
-NEWS_LIMIT    = 10
-SEND_HEADLINE = True     # False = فقط پیام غربالگری
+SOURCE = "filterBourseUniversity"   # منبع پست‌های فیلتری
+TOP_N      = 25                     # چند نماد برتر در پیام غربالگری
+NEWS_LIMIT = 10                     # چند تیتر در پیام صبح
 
-# ── ✅ وایت‌لیست نمادهای واقعی — اگر نماد معتبری جا افتاد، فقط اینجا اضافه‌اش کنید ──
+RUN_MODE = os.environ.get("RUN_MODE", "both").strip().lower()   # morning | afternoon | both
+
+# ── وایت‌لیست نمادهای واقعی — اگر نماد معتبری جا افتاد فقط همین‌جا اضافه‌اش کنید ──
 KNOWN = set("""فولاد فملی فولام بفغل کگل ذوب فماک فنورد فپلا فسپا فنما فخوز فباهنر فبستم
 فجام چدن کچاد کگهر کروی نوری کتو شپنا شبریز پارسان شپدیس شبندر شپلی فجر فاذر فکمند
 غاذر دفارا دتمد کمند وبملت وبصادر وتجارت وپاسار وبساخت وبشهر وبکویر وامید وتوس
 خبازر خبهمن خساپا خگستر خساز خودرو خکرمان غشهد غگل غپینو غنیش سفار سغرب سکرمان
 دورو حپترو وهور شستا شگستر کاریزما طلا عیار کارد برکت""".split())
 
-# این‌ها کلمهٔ عادی هم هستند؛ فقط داخل «» یا #هشتگ یا (پرانتز) پذیرفته می‌شوند، نه به‌تنهایی
+# این‌ها کلمهٔ عادی هم هستند؛ فقط داخل «» یا #هشتگ یا (پرانتز) پذیرفته می‌شوند
 AMBIG = {"طلا", "عیار", "کارد", "برکت", "کاریزما", "فجر"}
 KNOWN_BARE = KNOWN - AMBIG
 
 def send(text):
-    payload = {"chat_id": BALE_CHAT_ID, "text": text[:4000]}   # متن ساده — بدون parse_mode
+    payload = {"chat_id": BALE_CHAT_ID, "text": text[:4000]}   # متن ساده
     for _ in range(4):
         try:
             r = requests.post(API_URL, json=payload, timeout=30)
@@ -54,7 +55,7 @@ def fmt(p):
     try: return f"{int(float(str(p).replace(',', ''))):,}"
     except Exception: return str(p)
 
-# ───────── سرخطی ─────────
+# ───────── سرخطی (صبح) ─────────
 def fetch_market():
     cur = {}
     try: cur = requests.get("https://call.tgju.org/ajax.json", headers=UA, timeout=20).json().get("current", {})
@@ -80,7 +81,7 @@ def fetch_market():
     return idx + macro
 
 def fetch_news(limit=NEWS_LIMIT):
-    """خروجی: لیست (عنوان، لینک) از بورس‌پرس"""
+    """خروجی: لیست (عنوان، لینک) از بورس‌پرس — لینک زیر هر تیتر قرار می‌گیرد"""
     try:
         r = requests.get("https://boursepress.ir/", headers=UA, timeout=20)
         out, seen = [], set()
@@ -105,15 +106,17 @@ def build_headline():
         for name, p, dp in rows:
             d = f"  (+{dp}%)" if dp not in (None, "", "0", "0.0") else ""
             L.append(f"• {name}: {fmt(p)}{d}")
+    else:
+        L.append("• (نرخ‌ها در این اجرا خوانده نشد)")
     news = fetch_news()
     if news:
-        L += ["", "📰 تیترها:", "(برای خواندن، روی لینک بزنید)", ""]
+        L += ["", "📰 تیترها (لینک زیر هر تیتر):", ""]
         for i, (t, u) in enumerate(news, 1):
             L.append(f"{i}. {t}")
             L.append(f"   {u}")
     return "\n".join(L)
 
-# ───────── غربالگری روزانه ─────────
+# ───────── غربالگری (بعد بازار) ─────────
 AD_WORDS = ["صرافی","کریپتو","بایننس","تتر","usdt","ترید","کارمزد","تبلیغ","اینستا",
             "واتساپ","واتس","لایسنس","ساپورت","پشتیبانی خرید"]
 
@@ -124,8 +127,8 @@ PATTERNS = [
     r'\(([\u0600-\u06FF][\u0600-\u06FF\d]{1,14})\)',
 ]
 BOUND = r'(?<![\u0600-\u06FF\d]){}(?![\u0600-\u06FF\d])'
-KNOWN_ALL = {normalize(s) for s in KNOWN}
-KNOWN_BARE_N = {normalize(s) for s in KNOWN_BARE}
+KNOWN_ALL     = {normalize(s) for s in KNOWN}
+KNOWN_BARE_N  = {normalize(s) for s in KNOWN_BARE}
 
 def extract_symbols(t):
     t = normalize(t)
@@ -133,8 +136,8 @@ def extract_symbols(t):
     for pat in PATTERNS:
         for c in re.findall(pat, t):
             c = c.strip(" :：،,.؛()«»!؟?\"'-–")
-            if c in KNOWN_ALL: out.add(c)          # فقط نماد واقعی
-    for s in KNOWN_BARE_N:                          # به‌تنهایی با مرز کلمه
+            if c in KNOWN_ALL: out.add(c)          # فقط نماد واقعی (وایت‌لیست)
+    for s in KNOWN_BARE_N:                          # نماد شناخته‌شده به‌تنهایی با مرز کلمه
         if re.search(BOUND.format(re.escape(s)), t): out.add(s)
     return out
 
@@ -173,6 +176,7 @@ def post_date(iso):
         return None
 
 def collect():
+    """فقط پست‌های همان یک روز؛ خروجی: (رتبه‌بندی، تاریخ)"""
     posts = fetch_posts()
     if not posts: return None, None
     for p in posts: p["date"] = post_date(p["dt"])
@@ -202,9 +206,13 @@ def build_screen(ranked, d):
     L += ["", "🤖 خروجی خودکار است؛ توصیه خرید/فروش نیست."]
     return "\n".join(L)
 
+# ───────── اجرا ─────────
 if __name__ == "__main__":
-    if SEND_HEADLINE:
+    if RUN_MODE in ("morning", "both"):
         send(build_headline())
-    ranked, d = collect()
-    send(build_screen(ranked, d))
+        print("🌅 سرخطی ارسال شد")
+    if RUN_MODE in ("afternoon", "both"):
+        ranked, d = collect()
+        send(build_screen(ranked, d))
+        print("🎯 غربالگری ارسال شد")
     print("✅ پایان")
