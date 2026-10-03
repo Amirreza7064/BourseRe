@@ -1,12 +1,9 @@
 # -*- coding: utf-8 -*-
-"""فایل: bot.py
-بخش ۱: سرخطی بورس (شاخص‌ها + دلار/سکه/طلا + تیترهای بورس‌پرس)
-بخش ۲: غربالگری رله‌ای از کانال عمومی filterBourseUniversity
-اجرا: GitHub Actions → daily-scan"""
+"""فایل: bot.py — غربالگری بورس + سرخطی | اجرا: GitHub Actions → daily-scan"""
 
 import os, re, html, time
 import requests
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 BALE_TOKEN   = os.environ["BALE_TOKEN"]
@@ -14,8 +11,9 @@ BALE_CHAT_ID = os.environ["BALE_CHAT_ID"]
 API_URL = f"https://tapi.bale.ai/bot{BALE_TOKEN}/sendMessage"
 UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"}
 
-# ✅ کانال تنظیم‌شده — بعداً برای افزودن کانال دیگر فقط همین لیست را گسترش دهید
-CHANNELS = ["filterBourseUniversity"]
+SOURCE = "filterBourseUniversity"   # منبع داده (فقط داخل کد، در پیام نمی‌آید)
+TOP_N         = 25                  # چند نماد برتر ارسال شود
+SEND_HEADLINE = True                # پیام سرخطی هم بیاید؟ False = فقط غربالگری
 
 def send(text):
     text = text[:4000]
@@ -39,7 +37,7 @@ def fmt(p):
     try: return f"{int(float(str(p).replace(',', ''))):,}"
     except Exception: return str(p)
 
-# ───────── بخش ۱: سرخطی ─────────
+# ───────── سرخطی (بازار + اخبار) ─────────
 def fetch_news(limit=12):
     try:
         r = requests.get("https://boursepress.ir/", headers=UA, timeout=20)
@@ -47,15 +45,14 @@ def fetch_news(limit=12):
         for l in map(clean, re.findall(r">([^<>]{25,140})</a>", r.text)):
             if len(l) >= 25 and re.search(r"[\u0600-\u06FF]", l) and l not in seen:
                 seen.add(l); out.append(l)
-        print(f"اخبار: {len(out)}")
         return out[:limit]
-    except Exception as e:
-        print("news err:", str(e)[:90]); return []
+    except Exception:
+        return []
 
 def fetch_market():
     cur = {}
     try: cur = requests.get("https://call.tgju.org/ajax.json", headers=UA, timeout=20).json().get("current", {})
-    except Exception as e: print("tgju err:", str(e)[:90])
+    except Exception: pass
     macro = [(n, cur.get(k, {}).get("p"), cur.get(k, {}).get("dp"))
              for k, n in (("price_dollar_rl","دلار"),("sekee","سکه امامی"),("gerami18","طلای ۱۸"))]
     idx = []
@@ -75,107 +72,127 @@ def build_headline():
         for name, p, dp in rows:
             d = f"  ({dp}%)" if dp not in (None, "", "0", "0.0") else ""
             L.append(f"• {name}: {fmt(p)}{d}")
-    else:
-        L.append("• (شاخص‌ها در این اجرا خوانده نشد)")
     news = fetch_news()
     if news:
-        L += ["", "📰 تیترهای بورس‌پرس:"]
+        L += ["", "📰 تیترها:"]
         L += [f"{i}. {t}" for i, t in enumerate(news, 1)]
-    L += ["", "ℹ️ خبر و داده است؛ توصیه خرید/فروش نیست."]
     return "\n".join(L)
 
-# ───────── بخش ۲: غربالگری رله‌ای ─────────
+# ───────── غربالگری روزانه ─────────
 STOP = set("""بورس فرابورس شاخص بازار نماد سهام سهم خرید فروش سود زیان ورود خروج پول هوشمند
 سیگنال تحلیل تکنیکال بنیادی گزارش امروز فردا هفته ماه قیمت هدف حد ضرر سبد پیشنهاد توصیه
-سرمایه گذاران معاملات حقوقی حقیقی نقدینگی تقاضا عرضه صف دلار سکه طلا اونس تتر ریال تورم
-بانک مرکزی مجمع افزایش شفافیت گروه صنعتی تولید شرکت میلیارد میلیون ریالی درصد
-فیلتر کانال عضویت لینک ادامه توضیحات آموزش دانلود عکس ویدیو مهم فوری دانشگاه
-دیده بان جدول ستون ردیف کد نویسی فرمول دستور تعریف متغیر مقدار شرط خروجی""".split())
+سرمایه معاملات حقوقی حقیقی نقدینگی تقاضا عرضه صف دلار سکه طلا اونس تتر ریال تورم
+فیلتر کانال عضویت لینک ادامه توضیحات آموزش دانلود مهم فوری دانشگاه دیده بان جدول ستون
+کد نویسی فرمول دستور تعریف متغیر مقدار شرط خروجی رفقا دوستان سلام صبح عصر شب""".split())
 
 SEED = ["فولاد","فملی","شستا","شپنا","وبملت","خساپا","ذوب","کگل","فولام","بفغل","غپینو",
-        "شپدروا","فجر","کچاد","کگهر","پارسان","حپترو","تپمو","وهور","شبندر","غشهد","فنورد","کاریزما"]
+        "شپدروا","فجر","کچاد","کگهر","پارسان","حپترو","تپمو","وهور","شبندر","غشهد","فنورد"]
 
-def extract_symbols(t):
-    cands  = set(re.findall(r'«([^«»\n]{3,15})»', t))
-    cands |= set(re.findall(r'#([\w\u0600-\u06FF]{3,15})', t))
-    cands |= set(re.findall(r'(?:نماد|سهم)[:\s]+([\u0600-\u06FF]{3,15})', t))
-    cands |= set(re.findall(r'\(([\u0600-\u06FF]{3,15})\)', t))
-    cands |= set(s for s in SEED if s in t)
-    out = set()
-    for c in cands:
-        c = c.strip(" :：،,.؛()«»")
-        if len(c) < 3 or c in STOP or re.fullmatch(r"[\d.,%\-–]+", c): continue
-        out.add(c)
+# پست‌های تبلیغاتی/غیرمرتبط با این کلمات کنار گذاشته می‌شوند
+AD_WORDS = ["صرافی","کریپتو","بایننس","تتر","usdt","ترید","کارمزد","تبلیغ","اینستا",
+            "واتساپ","واتس","لایسنس","ساپورت","پشتیبانی خرید"]
+
+EXPLICIT = re.compile(
+    r'«([\u0600-\u06FF][\u0600-\u06FF\d]{2,14})»'          # «نماد»
+    r'|#([\u0600-\u06FF][\u0600-\u06FF\d]{2,14})'          # #نماد
+    r'|(?:نماد|سهم)\s*[:：]?\s*([\u0600-\u06FF][\u0600-\u06FF\d]{2,14})'  # نماد: X
+    r'|\(([\u0600-\u06FF][\u0600-\u06FF\d]{2,14})\)'       # (نماد)
+)
+LETTER = re.compile(r'[\u0620-\u064A\u066E-\u06D5]')
+
+def valid(sym):
+    if not (3 <= len(sym) <= 15): return False
+    if sym in STOP or not LETTER.search(sym): return False
+    return not re.fullmatch(r"[\d.,%\-–\s\u06F0-\u06F9]+", sym)
+
+def parse_page(page):
+    out, marks = [], list(re.finditer(r'data-post="[^"/]+/(\d+)"', page))
+    for i, m in enumerate(marks):
+        blk = page[m.start(): marks[i+1].start() if i+1 < len(marks) else len(page)]
+        tm  = re.search(r'<time[^>]*datetime="([^"]+)"', blk)
+        tx  = re.search(r'tgme_widget_message_text[^>]*>(.*?)</div>', blk, re.S)
+        if tx:
+            out.append({"id": int(m.group(1)),
+                        "dt": tm.group(1) if tm else None,
+                        "raw": tx.group(1)})
     return out
 
-def fetch_channel_posts(ch):
-    """دو صفحهٔ آخر پست‌های کانال (~۴۰ پست). خروجی: (لیست پیام، پیام خطا)"""
-    r = requests.get(f"https://t.me/s/{ch}", headers=UA, timeout=25)
-    if r.status_code != 200:
-        return None, f"⛔ {ch}: HTTP {r.status_code}"
-    page = r.text
-    msgs = re.findall(r'tgme_widget_message_text[^>]*>(.*?)</div>', page, re.S)
-    if not msgs:
-        msgs = re.findall(r'class="[^"]*message_text[^"]*"[^>]*>(.*?)</div>', page, re.S)
-    if not msgs:
-        print(f"--- dump {ch} ---"); print(page[:1200])
-        return None, f"⚠️ {ch}: باز شد ولی پیام متنی پیدا نشد (لاگ را ببینید)"
-    texts = list(msgs)
-    # صفحهٔ دوم برای پوشش بیشتر
-    ids = [int(i) for i in re.findall(r'data-post="[^"]*/(\d+)"', page)]
-    if ids:
+def fetch_posts(max_pages=3):
+    seen, allp, before = set(), [], None
+    for _ in range(max_pages):
+        url = f"https://t.me/s/{SOURCE}" + (f"?before={before}" if before else "")
         try:
-            r2 = requests.get(f"https://t.me/s/{ch}?before={min(ids)}", headers=UA, timeout=25)
-            if r2.status_code == 200:
-                texts += re.findall(r'tgme_widget_message_text[^>]*>(.*?)</div>', r2.text, re.S)
+            r = requests.get(url, headers=UA, timeout=25)
         except Exception:
-            pass
-    return texts, None
+            break
+        if r.status_code != 200: break
+        page = parse_page(r.text)
+        if not page: break
+        new = [p for p in page if p["id"] not in seen]
+        seen.update(p["id"] for p in new)
+        allp += new
+        mn = min(p["id"] for p in page)
+        if before is not None and mn >= before: break
+        before = mn
+        time.sleep(1)
+    return allp
 
-def relay_screen():
-    counts, srcs, posts, diag, seen = {}, {}, [], [], set()
-    for ch in CHANNELS:
-        ch = ch.strip().lstrip("@")
-        if not ch: continue
-        try:
-            msgs, err = fetch_channel_posts(ch)
-            if err:
-                diag.append(err); continue
-            diag.append(f"📡 {ch}: {len(msgs)} پیام خوانده شد")
-            ch_syms = set()
-            for m in msgs:
-                t = clean(m)
-                if len(t) < 10 or t[:80] in seen: continue
-                seen.add(t[:80]); posts.append((ch, t))
-                for c in extract_symbols(t):
-                    ch_syms.add(c)
-                    counts[c] = counts.get(c, 0) + 1
-                    srcs.setdefault(c, set()).add(ch)
-            diag.append(f"✅ {ch}: {len(ch_syms)} نماد استخراج شد")
-        except Exception as e:
-            diag.append(f"⛔ {ch}: {str(e)[:60]}")
-    return counts, srcs, posts, diag
+def post_date(iso):
+    try:
+        dt = datetime.fromisoformat(iso)
+        if dt.tzinfo is None: dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(ZoneInfo("Asia/Tehran")).date()
+    except Exception:
+        return None
 
-def build_relay(counts, srcs, posts, diag):
-    now = datetime.now(ZoneInfo("Asia/Tehran"))
-    L = [f"🔬 غربالگری رله‌ای — {now.strftime('%Y-%m-%d %H:%M')}", "", "🧭 منابع:"]
-    L += [f"  {d}" for d in diag] or ["  (کانالی تنظیم نشده!)"]
-    ranked = sorted(counts.items(), key=lambda kv: -kv[1])
-    top = [(s, c) for s, c in ranked if c >= 2][:10] or ranked[:10]
-    L.append("")
-    if top:
-        L.append("🔥 نمادهای پرتکرار در پست‌های فیلتر امروز:")
-        L += [f"{i}. {s} — {c} بار" for i, (s, c) in enumerate(top, 1)]
-    else:
-        L.append("امروز نماد برجسته‌ای استخراج نشد.")
-    L += ["", "📌 نمونه پست‌ها (برای کنترل کیفیت):"]
-    for ch, t in sorted(posts, key=lambda x: -len(x[1]))[:3]:
-        L.append(f"▪️ [{ch}] {t[:200]}…")
-    L += ["", "⚠️ گردآوری خودکار از کانال عمومی است؛ توصیه خرید/فروش نیست."]
+def collect():
+    """خروجی: (لیست رتبه‌بندی‌شده، تاریخ داده) — فقط پست‌های همان یک روز"""
+    posts = fetch_posts()
+    if not posts:
+        return None, None
+    for p in posts:
+        p["date"] = post_date(p["dt"])
+    today = datetime.now(ZoneInfo("Asia/Tehran")).date()
+    dated = [p for p in posts if p["date"]]
+    target = today if any(p["date"] == today for p in dated) else max(p["date"] for p in dated)
+    day_posts = [p for p in dated if p["date"] == target]
+
+    score, refs, seen_txt = {}, {}, set()
+    for p in day_posts:
+        t = clean(p["raw"])
+        if len(t) < 10 or t[:80] in seen_txt: continue
+        seen_txt.add(t[:80])
+        low = t.lower()
+        if any(a in low or a in t for a in AD_WORDS): continue
+        syms = set()
+        for g in EXPLICIT.findall(t):
+            s = next((x for x in g if x), None)
+            if s:
+                s = s.strip(" :：،,.؛()«»-–")
+                if valid(s): syms.add(s)
+        for s in SEED:
+            if s in t and s not in syms:
+                syms.add(s)
+        if not syms: continue
+        for s in syms:
+            score[s]  = score.get(s, 0) + 2
+            refs[s]   = refs.get(s, 0) + 1
+    ranked = sorted(score.items(), key=lambda kv: (-kv[1], -refs[kv[0]]))[:TOP_N]
+    return ranked, target
+
+def build_screen(ranked, d):
+    if ranked is None:
+        return "⛔ دریافت اطلاعات امروز ناموفق بود؛ در اجرای بعدی خودکار تلاش می‌شود."
+    if not ranked:
+        return f"📋 امروز ({d.isoformat()}) پست فیلتری با نماد مشخص ثبت نشده است."
+    L = [f"🎯 غربالگری بورس — نمادهای منتخب", f"📅 {d.isoformat()}", ""]
+    L += [f"{i}. {s}  ×{c}" for i, (s, c) in enumerate(ranked, 1)]
+    L += ["", "🤖 خروجی خودکار است؛ توصیه خرید/فروش نیست."]
     return "\n".join(L)
 
 if __name__ == "__main__":
-    send(build_headline())
-    c, s, p, d = relay_screen()
-    send(build_relay(c, s, p, d))
+    if SEND_HEADLINE:
+        send(build_headline())
+    ranked, d = collect()
+    send(build_screen(ranked, d))
     print("✅ پایان")
