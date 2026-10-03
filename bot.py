@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""ربات غربالگر بورس v2 — ضد بلاک: کل بازار در یک درخواست"""
+"""ربات سرخطی بورس → بله | منابع: بورس‌پرس (اخبار) + TGJU (شاخص‌ها) | اجرا: GitHub Actions"""
 
-import os, time, json, random
+import os, re, html, time
 import requests
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -9,136 +9,112 @@ from zoneinfo import ZoneInfo
 BALE_TOKEN   = os.environ["BALE_TOKEN"]
 BALE_CHAT_ID = os.environ["BALE_CHAT_ID"]
 API_URL = f"https://tapi.bale.ai/bot{BALE_TOKEN}/sendMessage"
-
-MIN_TODAY_VALUE = 20e9   # حداقل ارزش معاملات امروز (ریال) ≈ ۲ میلیارد تومان
-MAX_PE = 15.0
-TOP_N  = 12
-DEEP_N = 25              # تعدادی که برایشان روند و ورود پول بررسی می‌شود
-
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36",
-    "Referer": "https://www.tsetmc.com/",
-}
+UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"}
 
 def send(text):
+    text = text[:4000]   # محدودیت طول پیام
     for _ in range(3):
         try:
             r = requests.post(API_URL, json={"chat_id": BALE_CHAT_ID, "text": text}, timeout=30)
             if r.status_code == 200:
                 return True
-        except requests.RequestException:
-            pass
+            print("send:", r.status_code, r.text[:150])
+        except requests.RequestException as e:
+            print("send err:", str(e)[:100])
         time.sleep(3)
     return False
 
-# ───── منبع داده: کل بازار در یک درخواست (API دیده‌بان بازار) ─────
-MARKET_URLS = [
-    "https://cdn.tsetmc.com/api/MarketWatch/GetMarketWatch",
-    "https://cdn.tsetmc.com/api/MarketWatch/GetMarketWatchInit/0",
-]
+def clean(s):
+    s = html.unescape(s or "")
+    s = re.sub(r"<[^>]+>", "", s)
+    return re.sub(r"\s+", " ", s).strip()
 
-def fetch_market():
-    for url in MARKET_URLS:
-        for attempt in (1, 2):
-            try:
-                print(f"GET {url} (تلاش {attempt})")
-                r = requests.get(url, headers=HEADERS, timeout=40)
-                r.raise_for_status()
-                print(f"✅ پاسخ سالم — حجم: {len(r.content)//1024} کیلوبایت")
-                return r
-            except Exception as e:
-                print(f"⛔ {str(e)[:120]}")
-                time.sleep(8)
-    return None
+def fmt(p):
+    try:
+        return f"{int(float(str(p).replace(',', ''))):,}"
+    except Exception:
+        return str(p)
 
-def parse_market(resp):
-    data = json.loads(resp.text)
-    items = (((data.get("data") or {}).get("marketWatchList"))
-             or data.get("marketWatchList"))
-    if not items:
-        raise ValueError("ساختار ناشناخته: " + resp.text[:300])
-    print("نمونه ردیف: " + json.dumps(items[0], ensure_ascii=False)[:500])
-
-    rows = []
-    for it in items:
-        sym   = it.get("lVal18AFC") or ""
-        name  = it.get("lVal30") or ""
-        price = float(it.get("priceLast") or it.get("pClosing") or 0)
-        eps   = float(it.get("eps") or 0)
-        vol   = float(it.get("qTotTran5J") or 0)
-        value = float(it.get("qTotCap") or 0) or vol * price
-        pe    = float(it.get("pE") or it.get("pe") or 0)
-        if not pe and eps > 0 and price > 0:
-            pe = price / eps
-        rows.append({"sym": sym, "name": name, "price": price, "pe": pe, "value": value})
-    return rows
-
-def screen(rows):
-    pool = [r for r in rows
-            if r["sym"] and r["price"] > 0 and r["value"] >= MIN_TODAY_VALUE
-            and r["pe"] > 0 and r["pe"] <= MAX_PE]
-    print(f"پاس‌کرده از فیلتر اولیه: {len(pool)} نماد")
-    pool.sort(key=lambda r: (1 / r["pe"]) * (r["value"] ** 0.25), reverse=True)
-    return pool[:DEEP_N]
-
-def deep_dive(shortlist):
-    out = []
-    for i, r in enumerate(shortlist, 1):
-        rec = dict(r); rec["trend"] = None; rec["flow"] = None
+# ─── ۱) تیترها از بورس‌پرس ───
+def fetch_news(limit=14):
+    for url in ("https://boursepress.ir/rss", "https://boursepress.ir/feed",
+                "https://boursepress.ir/rss.xml", "https://boursepress.ir/feed/"):
         try:
-            from pytse_client import Ticker
-            t = Ticker(r["sym"])
-            h = t.history.tail(20)
-            if len(h) >= 15:
-                rec["trend"] = h["adjClose"].iloc[-1] / h["adjClose"].iloc[0] - 1
-            ct = t.client_types.tail(5)
-            if len(ct):
-                bp = ct["individual_buy_vol"].sum() / max(ct["individual_buy_count"].sum(), 1)
-                sp = ct["individual_sell_vol"].sum() / max(ct["individual_sell_count"].sum(), 1)
-                rec["flow"] = min(bp / sp, 3) if sp > 0 else 3
+            r = requests.get(url, headers=UA, timeout=20)
+            print("RSS", url, r.status_code, len(r.content))
+            if r.status_code != 200 or len(r.content) < 200:
+                continue
+            items = re.findall(r"<item>(.*?)</item>", r.text, re.S) or \
+                    re.findall(r"<entry>(.*?)</entry>", r.text, re.S)
+            titles = []
+            for it in items:
+                m = re.search(r"<title>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</title>", it, re.S)
+                t = clean(m.group(1)) if m else ""
+                if len(t) >= 18:
+                    titles.append(t)
+            if titles:
+                print(f"اخبار از RSS ({len(titles)})")
+                return titles[:limit]
         except Exception as e:
-            print(f"[{i}] {r['sym']}: {str(e)[:80]}")
-        out.append(rec)
-        print(f"[{i}] {r['sym']} ✅")
-        time.sleep(random.uniform(1.0, 1.8))
-    return out
+            print("rss err:", str(e)[:90])
+    # فالبک: تیترهای صفحهٔ اصلی
+    try:
+        r = requests.get("https://boursepress.ir/", headers=UA, timeout=20)
+        seen, out = set(), []
+        for l in map(clean, re.findall(r">([^<>]{25,140})</a>", r.text)):
+            if len(l) >= 25 and re.search(r"[\u0600-\u06FF]", l) and l not in seen:
+                seen.add(l); out.append(l)
+        print(f"اخبار از HTML ({len(out)})")
+        return out[:limit]
+    except Exception as e:
+        print("html err:", str(e)[:90])
+    return []
 
-def build_report(recs):
-    def score(r):
-        s = min(2.5, 12.0 / r["pe"]) * 2 if r["pe"] else 0
-        s += 2 if (r["flow"] or 0) >= 1.2 else 0
-        s += 1 if (r["trend"] is not None and 0 <= r["trend"] <= 0.30) else 0
-        return s
-    recs.sort(key=score, reverse=True)
+# ─── ۲) شاخص‌ها و ارز/طلا از TGJU ───
+def fetch_market():
+    cur = {}
+    try:
+        r = requests.get("https://call.tgju.org/ajax.json", headers=UA, timeout=20)
+        cur = r.json().get("current", {})
+    except Exception as e:
+        print("tgju err:", str(e)[:100])
+
+    idx = []
+    for k, v in cur.items():
+        if k.startswith("indices") or "index" in k.lower():
+            name = "شاخص کل" if "32097828338996571" in k else k
+            idx.append((name, v.get("p"), v.get("dp")))
+    if not idx:   # فالبک: صفحهٔ بورس TGJU
+        try:
+            r = requests.get("https://www.tgju.org/bourse", headers=UA, timeout=20)
+            m = re.search(r"شاخص کل.{0,400}?([\d,]{7,})", r.text, re.S)
+            if m: idx.append(("شاخص کل", m.group(1), None))
+        except Exception:
+            pass
+    macro = [(n, cur.get(k, {}).get("p"), cur.get(k, {}).get("dp"))
+             for k, n in (("price_dollar_rl", "دلار"), ("sekee", "سکه امامی"), ("gerami18", "طلای ۱۸"))]
+    return idx, macro
+
+def build():
     now = datetime.now(ZoneInfo("Asia/Tehran"))
-    lines = [f"📊 غربالگری بورس v2 — {now.strftime('%Y-%m-%d %H:%M')}", ""]
-    for i, r in enumerate(recs[:TOP_N], 1):
-        trend = f"{r['trend']*100:+.1f}%" if r["trend"] is not None else "—"
-        flow  = f"{r['flow']:.2f}"       if r["flow"]  is not None else "—"
-        lines.append(
-            f"{i}. {r['sym']} ({r['name']})\n"
-            f"   P/E: {r['pe']:.1f} | ارزش معاملات: {r['value']/1e9:.0f} میلیارد ریال | "
-            f"روند ۲۰ر: {trend} | ورود پول: {flow} | امتیاز: {score(r):.1f}"
-        )
-    lines += ["", "⚠️ خروجی فیلتر است، نه توصیه خرید."]
+    lines = [f"🌅 سرخطی بورس — {now.strftime('%Y-%m-%d %H:%M')}", ""]
+    idx, macro = fetch_market()
+    rows = [r for r in (idx + macro) if r[1]]
+    if rows:
+        lines.append("📊 بازار:")
+        for name, p, dp in rows:
+            d = f"  ({dp}%)" if dp not in (None, "", "0", "0.0") else ""
+            lines.append(f"• {name}: {fmt(p)}{d}")
+        lines.append("")
+    news = fetch_news()
+    if news:
+        lines.append("📰 تیترهای بورس‌پرس:")
+        for i, t in enumerate(news, 1):
+            lines.append(f"{i}. {t}")
+    if len(lines) <= 2:
+        lines.append("هیچ منبعی پاسخ نداد؛ در اجرای بعدی خودکار دوباره تلاش می‌شود.")
+    lines += ["", "ℹ️ صرفاً خبر و داده است؛ توصیه خرید/فروش نیست."]
     return "\n".join(lines)
 
-def main():
-    resp = fetch_market()
-    if resp is None:
-        send("⛔ دسترسی به TSETMC برقرار نشد؛ در اجرای بعدی خودکار دوباره تلاش می‌شود.")
-        return
-    try:
-        rows = parse_market(resp)
-    except Exception as e:
-        send("⚠️ ساختار داده TSETMC تغییر کرده است:\n" + str(e)[:1200])
-        raise
-    pool = screen(rows)
-    if not pool:
-        send("امروز هیچ نمادی فیلترها را پاس نکرد.")
-        return
-    send(build_report(deep_dive(pool)))
-    print("✅ تمام")
-
 if __name__ == "__main__":
-    main()
+    print(send(build()) and "✅ ارسال شد" or "❌ ارسال ناموفق")
