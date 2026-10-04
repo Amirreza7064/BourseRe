@@ -2,9 +2,10 @@ name: daily-scan
 
 on:
   schedule:
-    - cron: "5 6 * * 6,0-3"
-    - cron: "15 10 * * 6,0-3"
-    - cron: "55 11 * * *"         #تست موقت: ۱۵:۲۵ تهران — بعداً حذف شود — غربالگری بعد بازار
+    # زمان‌ها بر حسب UTC هستند (تهران = UTC + ۳:۳۰)
+    - cron: "5 6 * * 6,0-3"      # ۹:۳۵ تهران — سرخطی صبح
+    - cron: "15 10 * * 6,0-3"    # ۱۳:۴۵ تهران — غربالگری بعد از بازار
+    - cron: "15 13 * * *"        # تست موقت: ۱۶:۴۵ تهران — بعد از نتیجه حذف شود
   workflow_dispatch:
     inputs:
       mode:
@@ -16,7 +17,6 @@ on:
           - morning
           - afternoon
 
-# جلوگیری از اجرای هم‌زمان و تودرتو
 concurrency:
   group: daily-scan
   cancel-in-progress: false
