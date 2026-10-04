@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""فایل: bot.py — سرخطی + غربالگری + پاسخ به دستورهای /a و /b
+"""فایل: bot.py — سرخطی + غربالگری + دستورهای /a و /b با پاسخ فوری
 اجرا: GitHub Actions → daily-scan | حالت‌ها: morning / afternoon / both / poll"""
 
 import os, re, sys, html, time
@@ -70,7 +70,7 @@ def pct_suffix(dp):
     if dv == 0: return ""
     return f"  ({'+' if dv > 0 else ''}{dv:g}%)"
 
-# ───────── سرخطی (صبح و دستور /a) ─────────
+# ───────── سرخطی ─────────
 def fetch_market():
     cur = {}
     try:
@@ -151,7 +151,7 @@ def build_headline():
             body += block + "\n".join(items)
     return body
 
-# ───────── غربالگری (عصر و دستور /b) ─────────
+# ───────── غربالگری ─────────
 AD_WORDS = ["صرافی","کریپتو","بایننس","تتر","usdt","ترید","کارمزد","تبلیغ","اینستا",
             "واتساپ","واتس","لایسنس","ساپورت","پشتیبانی خرید"]
 
@@ -240,11 +240,23 @@ def build_screen(ranked, d):
     L += ["", "🤖 خروجی خودکار است؛ توصیه خرید/فروش نیست."]
     return "\n".join(L)
 
-# ───────── دستورهای /a و /b (حالت poll) ─────────
+# ───────── دستورهای /a و /b ─────────
 CMD_ALIASES = {
     "/a": "news", "/A": "news", "/اخبار": "news",
     "/b": "screen", "/B": "screen", "/غربال": "screen",
 }
+
+ACK = {
+    "news":   "🔎 در حال دریافت اخبار و جمع‌آوری داده‌های بورسی...",
+    "screen": "📈 درحال تحلیل بازار بورسی...",
+}
+
+def ack(chat_id, cmd):
+    """پاسخ فوری کوتاه برای حس لحظه‌ای"""
+    try:
+        send_to(chat_id, ACK.get(cmd, "⏳ در حال پردازش..."))
+    except Exception:
+        pass
 
 def get_updates(offset=None, timeout=0):
     params = {"timeout": timeout}
@@ -270,13 +282,14 @@ def poll_and_respond():
         msg  = u.get("message") or {}
         chat = (msg.get("chat") or {}).get("id")
         text = (msg.get("text") or "").strip()
-        if str(chat) != str(BALE_CHAT_ID):   # فقط صاحب ربات
+        if str(chat) != str(BALE_CHAT_ID):
             continue
         cmd = CMD_ALIASES.get(text)
         if not cmd:
             continue
         done += 1
         if done > 6: break                    # سقف ایمنی در هر اجرا
+        ack(chat, cmd)                        # پاسخ فوری «در حال...»
         try:
             if cmd == "news":
                 send_to(chat, build_headline())
@@ -290,7 +303,7 @@ def poll_and_respond():
             print("cmd err:", str(e)[:150])
             send_to(chat, "⛔ خطا در اجرا؛ لطفاً دوباره امتحان کنید.")
     if max_id:
-        get_updates(offset=max_id + 1)        # تأیید: همان‌ها دوباره پردازش نشوند
+        get_updates(offset=max_id + 1)        # تأیید پردازش: دوباره اجرا نشوند
     print(f"دستورها: {done} | پاسخ داده شد: {replied}")
 
 # ───────── اجرا ─────────
