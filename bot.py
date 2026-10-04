@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
-"""فایل: bot.py — سرخطی + غربالگری + دستورهای /a و /b با پاسخ فوری
-اجرا: GitHub Actions → daily-scan | حالت‌ها: morning / afternoon / both / poll"""
+"""فایل: bot.py — سرخطی + غربالگری + دستورهای /a و /b (poll و شنودگر دائمی)
+حالت‌ها: morning | afternoon | both | poll | listen"""
 
 import os, re, sys, html, time
 import requests
@@ -13,6 +13,7 @@ if not BALE_TOKEN or not BALE_CHAT_ID:
     sys.exit("⛔ BALE_TOKEN یا BALE_CHAT_ID در Secrets تنظیم نشده است")
 
 API_URL     = f"https://tapi.bale.ai/bot{BALE_TOKEN}/sendMessage"
+EDIT_URL    = f"https://tapi.bale.ai/bot{BALE_TOKEN}/editMessageText"
 UPDATES_URL = f"https://tapi.bale.ai/bot{BALE_TOKEN}/getUpdates"
 UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"}
 
@@ -21,7 +22,7 @@ TOP_N      = 25
 NEWS_LIMIT = 10
 MAXLEN     = 3900
 
-RUN_MODE = os.environ.get("RUN_MODE", "both").strip().lower()   # morning | afternoon | both | poll
+RUN_MODE = os.environ.get("RUN_MODE", "both").strip().lower()   # morning | afternoon | both | poll | listen
 
 # ── وایت‌لیست نمادهای واقعی ──
 KNOWN = set("""فولاد فملی فولام بفغل کگل ذوب فماک فنورد فپلا فسپا فنما فخوز فباهنر فبستم
@@ -32,20 +33,25 @@ KNOWN = set("""فولاد فملی فولام بفغل کگل ذوب فماک ف
 AMBIG = {"طلا", "عیار", "کارد", "برکت", "کاریزما", "فجر"}
 KNOWN_BARE = KNOWN - AMBIG
 
-def send(text):
-    return send_to(BALE_CHAT_ID, text)
-
-def send_to(chat_id, text):
-    payload = {"chat_id": chat_id, "text": text[:4096]}
+def send_to(chat_id, text, msg_id=None):
+    if msg_id:
+        payload = {"chat_id": chat_id, "message_id": msg_id, "text": text[:4096]}
+        url = EDIT_URL
+    else:
+        payload = {"chat_id": chat_id, "text": text[:4096]}
+        url = API_URL
     for _ in range(4):
         try:
-            r = requests.post(API_URL, json=payload, timeout=30)
+            r = requests.post(url, json=payload, timeout=30)
             if r.status_code == 200: return True
             print("send:", r.status_code, r.text[:120])
         except requests.RequestException as e:
             print("send err:", str(e)[:90])
         time.sleep(3)
     return False
+
+def send(text):
+    return send_to(BALE_CHAT_ID, text)
 
 def clean(s):
     s = html.unescape(s or "")
@@ -240,7 +246,7 @@ def build_screen(ranked, d):
     L += ["", "🤖 خروجی خودکار است؛ توصیه خرید/فروش نیست."]
     return "\n".join(L)
 
-# ───────── دستورهای /a و /b ─────────
+# ───────── دستورها: پاسخ فوری + ویرایش به نتیجه ─────────
 CMD_ALIASES = {
     "/a": "news", "/A": "news", "/اخبار": "news",
     "/b": "screen", "/B": "screen", "/غربال": "screen",
@@ -250,19 +256,58 @@ ACK = {
     "news":   "🔎 در حال دریافت اخبار و جمع‌آوری داده‌های بورسی...",
     "screen": "📈 درحال تحلیل بازار بورسی...",
 }
+SEND_RESULT_AS_NEW = True   # علاوه بر ویرایش، پیام جدید هم بیاید؟ (برای نوتیف)
 
 def ack(chat_id, cmd):
-    """پاسخ فوری کوتاه برای حس لحظه‌ای"""
+    """«در حال...» می‌فرستد و message_id آن را برمی‌گرداند (برای ویرایش بعدی)"""
     try:
-        send_to(chat_id, ACK.get(cmd, "⏳ در حال پردازش..."))
-    except Exception:
-        pass
+        payload = {"chat_id": chat_id, "text": ACK.get(cmd, "⏳ در حال پردازش...")}
+        r = requests.post(API_URL, json=payload, timeout=30)
+        if r.status_code == 200:
+            return r.json().get("result", {}).get("message_id")
+        print("ack:", r.status_code, r.text[:120])
+    except requests.RequestException as e:
+        print("ack err:", str(e)[:90])
+    return None
+
+def handle_update(u):
+    """یک آپدیت را پردازش و پاسخ می‌دهد. خروجی: آیا دستور اجرا شد؟"""
+    msg  = u.get("message") or {}
+    chat = (msg.get("chat") or {}).get("id")
+    text = (msg.get("text") or "").strip()
+    if not chat or str(chat) != str(BALE_CHAT_ID):
+        return False
+    cmd = CMD_ALIASES.get(text)
+    if not cmd:
+        return False
+    ack_id = ack(chat, cmd)
+    try:
+        if cmd == "news":
+            result = build_headline()
+            print("⚡ /a اجرا شد")
+        else:
+            ranked, d = collect()
+            result = build_screen(ranked, d)
+            print("⚡ /b اجرا شد")
+        if ack_id:
+            send_to(chat, result, msg_id=ack_id)      # پیام انتظار ← نتیجه
+        else:
+            send_to(chat, result)
+        if SEND_RESULT_AS_NEW and ack_id:
+            send_to(chat, "📩 " + result.splitlines()[0])   # نوتیف سبک
+        return True
+    except Exception as e:
+        print("cmd err:", str(e)[:150])
+        body = "⛔ خطا در اجرا؛ لطفاً دوباره امتحان کنید."
+        if ack_id: send_to(chat, body, msg_id=ack_id)
+        else:      send_to(chat, body)
+        return False
 
 def get_updates(offset=None, timeout=0):
     params = {"timeout": timeout}
     if offset: params["offset"] = offset
     try:
-        r = requests.get(UPDATES_URL, params=params, headers=UA, timeout=60)
+        r = requests.get(UPDATES_URL, params=params, headers=UA, timeout=max(70, timeout + 20))
         if r.status_code == 200:
             return r.json().get("result", []) or []
         print("getUpdates:", r.status_code, r.text[:120])
@@ -270,6 +315,7 @@ def get_updates(offset=None, timeout=0):
         print("getUpdates err:", str(e)[:90])
     return []
 
+# حالت poll (از طریق cron-job هر چند دقیقه — جایگزین شنودگر)
 def poll_and_respond():
     updates = get_updates()
     if not updates:
@@ -279,36 +325,38 @@ def poll_and_respond():
     for u in updates:
         uid = u.get("update_id", 0)
         if uid > max_id: max_id = uid
-        msg  = u.get("message") or {}
-        chat = (msg.get("chat") or {}).get("id")
-        text = (msg.get("text") or "").strip()
-        if str(chat) != str(BALE_CHAT_ID):
-            continue
-        cmd = CMD_ALIASES.get(text)
-        if not cmd:
-            continue
-        done += 1
-        if done > 6: break                    # سقف ایمنی در هر اجرا
-        ack(chat, cmd)                        # پاسخ فوری «در حال...»
-        try:
-            if cmd == "news":
-                send_to(chat, build_headline())
-                print("⚡ /a اجرا شد")
-            else:
-                ranked, d = collect()
-                send_to(chat, build_screen(ranked, d))
-                print("⚡ /b اجرا شد")
-            replied += 1
-        except Exception as e:
-            print("cmd err:", str(e)[:150])
-            send_to(chat, "⛔ خطا در اجرا؛ لطفاً دوباره امتحان کنید.")
+        if done >= 6: break                          # سقف ایمنی در هر اجرا
+        if handle_update(u):
+            done += 1; replied += 1
     if max_id:
-        get_updates(offset=max_id + 1)        # تأیید پردازش: دوباره اجرا نشوند
-    print(f"دستورها: {done} | پاسخ داده شد: {replied}")
+        get_updates(offset=max_id + 1)               # تأیید پردازش
+    print(f"دستورها: {replied}")
+
+# حالت listen (شنودگر دائمی — جواب در چند ثانیه)
+def listen():
+    print("🎧 شنودگر فعال شد — گوش می‌دهم...")
+    offset = None
+    while True:
+        try:
+            updates = get_updates(offset=offset, timeout=50)
+            if not updates:
+                time.sleep(1)                        # محافظت در برابر فشار بیش‌ازحد
+                continue
+            for u in updates:
+                offset = max(offset or 0, u.get("update_id", 0) + 1)
+                try:
+                    handle_update(u)
+                except Exception as e:
+                    print("handle err:", str(e)[:150])
+        except Exception as e:
+            print("listen err:", str(e)[:120])
+            time.sleep(5)
 
 # ───────── اجرا ─────────
 if __name__ == "__main__":
-    if RUN_MODE == "poll":
+    if RUN_MODE == "listen":
+        listen()
+    elif RUN_MODE == "poll":
         poll_and_respond()
     else:
         if RUN_MODE in ("morning", "both"):
