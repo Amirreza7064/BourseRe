@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
-"""فایل: bot.py — سرخطی بورس (صبح) + غربالگری روزانه (بعد بازار)
-اجرا: GitHub Actions → daily-scan | حالت اجرا با متغیر RUN_MODE کنترل می‌شود"""
+"""فایل: bot.py — سرخطی + غربالگری + پاسخ به دستورهای /a و /b
+اجرا: GitHub Actions → daily-scan | حالت‌ها: morning / afternoon / both / poll"""
 
 import os, re, sys, html, time
 import requests
@@ -12,29 +12,31 @@ BALE_CHAT_ID = os.environ.get("BALE_CHAT_ID", "").strip()
 if not BALE_TOKEN or not BALE_CHAT_ID:
     sys.exit("⛔ BALE_TOKEN یا BALE_CHAT_ID در Secrets تنظیم نشده است")
 
-API_URL = f"https://tapi.bale.ai/bot{BALE_TOKEN}/sendMessage"
+API_URL     = f"https://tapi.bale.ai/bot{BALE_TOKEN}/sendMessage"
+UPDATES_URL = f"https://tapi.bale.ai/bot{BALE_TOKEN}/getUpdates"
 UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"}
 
-SOURCE    = "filterBourseUniversity"  # منبع پست‌های فیلتری
-TOP_N     = 25                        # چند نماد برتر در پیام غربالگری
-NEWS_LIMIT = 10                       # حداکثر تیتر در پیام صبح
-MAXLEN    = 3900                      # سقف امن طول پیام
+SOURCE     = "filterBourseUniversity"
+TOP_N      = 25
+NEWS_LIMIT = 10
+MAXLEN     = 3900
 
-RUN_MODE = os.environ.get("RUN_MODE", "both").strip().lower()   # morning | afternoon | both
+RUN_MODE = os.environ.get("RUN_MODE", "both").strip().lower()   # morning | afternoon | both | poll
 
-# ── وایت‌لیست نمادهای واقعی — اگر نماد معتبری جا افتاد فقط همین‌جا اضافه‌اش کنید ──
+# ── وایت‌لیست نمادهای واقعی ──
 KNOWN = set("""فولاد فملی فولام بفغل کگل ذوب فماک فنورد فپلا فسپا فنما فخوز فباهنر فبستم
 فجام چدن کچاد کگهر کروی نوری کتو شپنا شبریز پارسان شپدیس شبندر شپلی فجر فاذر فکمند
 غاذر دفارا دتمد کمند وبملت وبصادر وتجارت وپاسار وبساخت وبشهر وبکویر وامید وتوس
 خبازر خبهمن خساپا خگستر خساز خودرو خکرمان غشهد غگل غپینو غنیش سفار سغرب سکرمان
 دورو حپترو وهور شستا شگستر کاریزما طلا عیار کارد برکت""".split())
-
-# این‌ها کلمهٔ عادی هم هستند؛ فقط داخل «» یا #هشتگ یا (پرانتز) پذیرفته می‌شوند
 AMBIG = {"طلا", "عیار", "کارد", "برکت", "کاریزما", "فجر"}
 KNOWN_BARE = KNOWN - AMBIG
 
 def send(text):
-    payload = {"chat_id": BALE_CHAT_ID, "text": text[:4096]}
+    return send_to(BALE_CHAT_ID, text)
+
+def send_to(chat_id, text):
+    payload = {"chat_id": chat_id, "text": text[:4096]}
     for _ in range(4):
         try:
             r = requests.post(API_URL, json=payload, timeout=30)
@@ -63,13 +65,12 @@ def fmt(p):
     except Exception: return str(p)
 
 def pct_suffix(dp):
-    """(3.65%) یا (-1.2%) — بدون +- دوتایی"""
     try: dv = float(str(dp))
     except (TypeError, ValueError): return ""
     if dv == 0: return ""
     return f"  ({'+' if dv > 0 else ''}{dv:g}%)"
 
-# ───────── سرخطی (صبح) ─────────
+# ───────── سرخطی (صبح و دستور /a) ─────────
 def fetch_market():
     cur = {}
     try:
@@ -78,7 +79,6 @@ def fetch_market():
         print("tgju err:", str(e)[:90])
 
     def gfind(*frags):
-        """اولین کلیدی که همهٔ تکه‌ها را داشته باشد (مقاوم به تغییر نام کلیدها)"""
         for k, v in cur.items():
             kl = k.lower()
             if isinstance(v, dict) and v.get("p") and all(f in kl for f in frags):
@@ -93,7 +93,6 @@ def fetch_market():
     add("سکه امامی", cur.get("sekee") or gfind("sekke") or gfind("seke"))
     add("طلای ۱۸",   gfind("geram") or gfind("tala_") or gfind("gold_"))
 
-    # شاخص‌ها: اول تلاش از صفحهٔ بورس TGJU …
     idx = []
     for page_url in ("https://www.tgju.org/bourse", "https://www.tgju.org/"):
         try:
@@ -105,14 +104,12 @@ def fetch_market():
             if len(idx) >= 2: break
         except Exception:
             pass
-    # … اگر نشد، از کلیدهای index در ajax
     if not idx:
         iv = gfind("indices") or gfind("index")
         if iv: idx.append(("شاخص کل", iv.get("p"), iv.get("dp")))
     return idx + rows
 
 def fetch_news(limit=NEWS_LIMIT):
-    """خروجی: لیست (عنوان، لینک) از بورس‌پرس — لینک‌ها نرمال و تک‌خطی"""
     try:
         r = requests.get("https://boursepress.ir/", headers=UA, timeout=20)
         out, seen = [], set()
@@ -148,14 +145,13 @@ def build_headline():
         items = []
         for i, (t, u) in enumerate(news, 1):
             item = f"{i}. {t}\n   {u}"
-            # پیام هرگز از سقف طول رد نمی‌شود؛ تیتر اضافه فقط تا جایی که جا باشد
             if len(body) + len(block) + len(item) + 1 > MAXLEN: break
             items.append(item)
         if items:
             body += block + "\n".join(items)
     return body
 
-# ───────── غربالگری (بعد بازار) ─────────
+# ───────── غربالگری (عصر و دستور /b) ─────────
 AD_WORDS = ["صرافی","کریپتو","بایننس","تتر","usdt","ترید","کارمزد","تبلیغ","اینستا",
             "واتساپ","واتس","لایسنس","ساپورت","پشتیبانی خرید"]
 
@@ -175,8 +171,8 @@ def extract_symbols(t):
     for pat in PATTERNS:
         for c in re.findall(pat, t):
             c = c.strip(" :：،,.؛()«»!؟?\"'-–")
-            if c in KNOWN_ALL: out.add(c)          # فقط نماد واقعی (وایت‌لیست)
-    for s in KNOWN_BARE_N:                          # نماد شناخته‌شده به‌تنهایی با مرز کلمه
+            if c in KNOWN_ALL: out.add(c)
+    for s in KNOWN_BARE_N:
         if re.search(BOUND.format(re.escape(s)), t): out.add(s)
     return out
 
@@ -215,7 +211,6 @@ def post_date(iso):
         return None
 
 def collect():
-    """فقط پست‌های همان یک روز؛ خروجی: (رتبه‌بندی، تاریخ)"""
     posts = fetch_posts()
     if not posts: return None, None
     for p in posts: p["date"] = post_date(p["dt"])
@@ -245,21 +240,77 @@ def build_screen(ranked, d):
     L += ["", "🤖 خروجی خودکار است؛ توصیه خرید/فروش نیست."]
     return "\n".join(L)
 
+# ───────── دستورهای /a و /b (حالت poll) ─────────
+CMD_ALIASES = {
+    "/a": "news", "/A": "news", "/اخبار": "news",
+    "/b": "screen", "/B": "screen", "/غربال": "screen",
+}
+
+def get_updates(offset=None, timeout=0):
+    params = {"timeout": timeout}
+    if offset: params["offset"] = offset
+    try:
+        r = requests.get(UPDATES_URL, params=params, headers=UA, timeout=60)
+        if r.status_code == 200:
+            return r.json().get("result", []) or []
+        print("getUpdates:", r.status_code, r.text[:120])
+    except requests.RequestException as e:
+        print("getUpdates err:", str(e)[:90])
+    return []
+
+def poll_and_respond():
+    updates = get_updates()
+    if not updates:
+        print("دستور جدیدی نیست")
+        return
+    max_id, replied, done = 0, 0, 0
+    for u in updates:
+        uid = u.get("update_id", 0)
+        if uid > max_id: max_id = uid
+        msg  = u.get("message") or {}
+        chat = (msg.get("chat") or {}).get("id")
+        text = (msg.get("text") or "").strip()
+        if str(chat) != str(BALE_CHAT_ID):   # فقط صاحب ربات
+            continue
+        cmd = CMD_ALIASES.get(text)
+        if not cmd:
+            continue
+        done += 1
+        if done > 6: break                    # سقف ایمنی در هر اجرا
+        try:
+            if cmd == "news":
+                send_to(chat, build_headline())
+                print("⚡ /a اجرا شد")
+            else:
+                ranked, d = collect()
+                send_to(chat, build_screen(ranked, d))
+                print("⚡ /b اجرا شد")
+            replied += 1
+        except Exception as e:
+            print("cmd err:", str(e)[:150])
+            send_to(chat, "⛔ خطا در اجرا؛ لطفاً دوباره امتحان کنید.")
+    if max_id:
+        get_updates(offset=max_id + 1)        # تأیید: همان‌ها دوباره پردازش نشوند
+    print(f"دستورها: {done} | پاسخ داده شد: {replied}")
+
 # ───────── اجرا ─────────
 if __name__ == "__main__":
-    if RUN_MODE in ("morning", "both"):
-        try:
-            send(build_headline())
-            print("🌅 سرخطی ارسال شد")
-        except Exception as e:
-            print("headline err:", str(e)[:200])
-            send("⛔ خطا در ساخت سرخطی؛ در اجرای بعدی تلاش می‌شود.")
-    if RUN_MODE in ("afternoon", "both"):
-        try:
-            ranked, d = collect()
-            send(build_screen(ranked, d))
-            print("🎯 غربالگری ارسال شد")
-        except Exception as e:
-            print("screen err:", str(e)[:200])
-            send("⛔ خطای غیرمنتظره در غربالگری؛ در اجرای بعدی تلاش می‌شود.")
+    if RUN_MODE == "poll":
+        poll_and_respond()
+    else:
+        if RUN_MODE in ("morning", "both"):
+            try:
+                send(build_headline())
+                print("🌅 سرخطی ارسال شد")
+            except Exception as e:
+                print("headline err:", str(e)[:200])
+                send("⛔ خطا در ساخت سرخطی؛ در اجرای بعدی تلاش می‌شود.")
+        if RUN_MODE in ("afternoon", "both"):
+            try:
+                ranked, d = collect()
+                send(build_screen(ranked, d))
+                print("🎯 غربالگری ارسال شد")
+            except Exception as e:
+                print("screen err:", str(e)[:200])
+                send("⛔ خطای غیرمنتظره در غربالگری؛ در اجرای بعدی تلاش می‌شود.")
     print("✅ پایان")
