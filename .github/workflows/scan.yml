@@ -11,6 +11,8 @@ on:
           - both
           - morning
           - afternoon
+          - poll
+
 concurrency:
   group: daily-scan
   cancel-in-progress: false
@@ -24,9 +26,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
       - run: pip install -r requirements.txt
       - run: python -u bot.py
         env:
           BALE_TOKEN: ${{ secrets.BALE_TOKEN }}
           BALE_CHAT_ID: ${{ secrets.BALE_CHAT_ID }}
-          RUN_MODE: ${{ github.event.inputs.mode || (github.event.schedule == '5 6 * * 6,0-3' && 'morning' || 'afternoon') }}
+          RUN_MODE: ${{ github.event.inputs.mode || 'both' }}
