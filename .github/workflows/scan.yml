@@ -27,7 +27,8 @@ jobs:
         with:
           python-version: "3.11"
           cache: "pip"
-      - run: pip install -r requirements.txt
+      - if: github.event.inputs.mode != 'poll'
+        run: pip install -r requirements.txt
       - run: python -u bot.py
         env:
           BALE_TOKEN: ${{ secrets.BALE_TOKEN }}
