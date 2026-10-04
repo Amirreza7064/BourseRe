@@ -1,5 +1,5 @@
 name: daily-scan
-
+ 
 on:
   schedule:
     - cron: "0 6 * * 6,0-3"    # ۹:۳۰ تهران — سرخطی صبح
