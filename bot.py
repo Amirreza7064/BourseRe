@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
-"""فایل: bot.py — سرخطی + غربالگری + /a /b + /c نماد (چارت JPG) + /d نماد (سطوح)
-منبع دادهٔ نماد: databourse.ir (از Actions باز است — بدون پراکسی)
+"""فایل: bot.py — سرخطی + غربالگری واقعی دیتابورس + /c نماد (چارت) + /d نماد (سطوح)
+منبع داده: databourse.ir (باز از Actions) + tgju + بورس‌پرس
 حالت‌ها: morning | afternoon | both | poll | listen"""
 
-import os, re, io, sys, html, time
+import os, re, io, sys, html, math, time
 import urllib.parse
 import requests
-from datetime import datetime, timezone
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 BALE_TOKEN   = os.environ.get("BALE_TOKEN", "").strip()
@@ -21,24 +21,15 @@ PHOTO_URL   = f"{BASE}/sendPhoto"
 UPDATES_URL = f"{BASE}/getUpdates"
 UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"}
 
-DB = "https://databourse.ir"     # منبع دادهٔ نمادها — باز از خارج از ایران
+DB = "https://databourse.ir"          # منبع دادهٔ نمادها — باز از خارج از ایران
 
-SOURCE     = "filterBourseUniversity"
 TOP_N      = 25
 NEWS_LIMIT = 10
 MAXLEN     = 3900
-SEND_RESULT_AS_NEW = True
+MIN_VALUE  = 2_000        # حداقل ارزش معاملات (میلیون ریال) ≈ ۲۰۰ میلیون تومان
+SEND_RESULT_AS_NEW = True # بعد از ویرایش پیام انتظار، پیام نوتیف هم بیاید؟
 
-RUN_MODE = os.environ.get("RUN_MODE", "both").strip().lower()
-
-# ── وایت‌لیست غربالگری ──
-KNOWN = set("""فولاد فملی فولام بفغل کگل ذوب فماک فنورد فپلا فسپا فنما فخوز فباهنر فبستم
-فجام چدن کچاد کگهر کروی نوری کتو شپنا شبریز پارسان شپدیس شبندر شپلی فجر فاذر فکمند
-غاذر دفارا دتمد کمند وبملت وبصادر وتجارت وپاسار وبساخت وبشهر وبکویر وامید وتوس
-خبازر خبهمن خساپا خگستر خساز خودرو خکرمان غشهد غگل غپینو غنیش سفار سغرب سکرمان
-دورو حپترو وهور شستا شگستر کاریزما طلا عیار کارد برکت""".split())
-AMBIG = {"طلا", "عیار", "کارد", "برکت", "کاریزما", "فجر"}
-KNOWN_BARE = KNOWN - AMBIG
+RUN_MODE = os.environ.get("RUN_MODE", "both").strip().lower()   # morning|afternoon|both|poll|listen
 
 # ───────── ارسال ─────────
 def send_to(chat_id, text, msg_id=None):
@@ -98,7 +89,7 @@ def one_line(s): return re.sub(r"\s+", " ", s).strip()
 
 def normalize(s):
     return (s or "").replace("ي", "ی").replace("ك", "ک").replace("أ", "ا") \
-                    .replace("إ", "ا").replace("ة", "ه").replace("ؤ", "و")
+                    .replace("إ", "ا").replace("ة", "ه").replace("ؤ", "و").replace("ـ", "")
 
 def fmt(p):
     try: return f"{int(float(str(p).replace(',', ''))):,}"
@@ -112,7 +103,15 @@ def pct_suffix(dp):
 
 def avg(xs): return sum(xs) / len(xs)
 
-# ───────── سرخطی ─────────
+def to_num(s):
+    s = str(s or "").replace(",", "").replace("%", "").strip()
+    neg = s.startswith("-") or ("(" in s and ")" in s)
+    m = re.search(r'-?\d+\.?\d*', s)
+    if not m: return None
+    v = float(m.group())
+    return -v if neg and v > 0 else v
+
+# ───────── سرخطی (tgju + بورس‌پرس) ─────────
 def fetch_market():
     cur = {}
     try:
@@ -188,95 +187,124 @@ def build_headline():
             body += block + "\n".join(items)
     return body
 
-# ───────── غربالگری ─────────
-AD_WORDS = ["صرافی","کریپتو","بایننس","تتر","usdt","ترید","کارمزد","تبلیغ","اینستا",
-            "واتساپ","واتس","لایسنس","ساپورت","پشتیبانی خرید"]
-PATTERNS = [
-    r'«([^«»\n]{2,15})»',
-    r'#([\w\u0600-\u06FF]{2,15})',
-    r'(?:نماد|سهم|سهام)\s*[:：]?\s*([\u0600-\u06FF][\u0600-\u06FF\d]{1,14})',
-    r'\(([\u0600-\u06FF][\u0600-\u06FF\d]{1,14})\)',
-]
-BOUND = r'(?<![\u0600-\u06FF\d]){}(?![\u0600-\u06FF\d])'
-KNOWN_ALL    = {normalize(s) for s in KNOWN}
-KNOWN_BARE_N = {normalize(s) for s in KNOWN_BARE}
+# ───────── دیتابورس: پارس جدول‌های SSR ─────────
+def split_row(cells):
+    """ردیف جدول دیتابورس → (نماد، اعداد ساده به‌ترتیب، درصدهای پرانتزی به‌ترتیب)
+    ساختار marketwatch:   [نماد، آخرین، (درصد)، پایانی، (درصد)، تعداد، حجم، ارزش]
+    ساختار smart-money:   [نماد، قدرت، آخرین، (درصد)، پایانی، (درصد)، تعداد، حجم، ارزش]
+    چون سلول قیمت دو زیرسلول دارد، هدرها به‌درستی با dict جفت نمی‌شوند؛
+    پس جداکردن «اعداد ساده» از «پرانتزی‌ها» قابل‌اعتمادترین راه است."""
+    if not cells: return None, [], []
+    sym = normalize(cells[0].strip())
+    if not (3 <= len(sym) <= 15) or not re.search(r'[\u0600-\u06FF]', sym):
+        return None, [], []
+    plain, paren = [], []
+    for c in cells[1:]:
+        c = c.strip()
+        if "(" in c and ")" in c:
+            v = to_num(c)
+            if v is not None: paren.append(v)
+        else:
+            v = to_num(c)
+            if v is not None: plain.append(v)
+    return sym, plain, paren
 
-def extract_symbols(t):
-    t = normalize(t); out = set()
-    for pat in PATTERNS:
-        for c in re.findall(pat, t):
-            c = c.strip(" :：،,.؛()«»!؟?\"'-–")
-            if c in KNOWN_ALL: out.add(c)
-    for s in KNOWN_BARE_N:
-        if re.search(BOUND.format(re.escape(s)), t): out.add(s)
-    return out
-
-def parse_page(page):
-    out, marks = [], list(re.finditer(r'data-post="[^"/]+/(\d+)"', page))
-    for i, m in enumerate(marks):
-        blk = page[m.start(): marks[i+1].start() if i+1 < len(marks) else len(page)]
-        tm = re.search(r'<time[^>]*datetime="([^"]+)"', blk)
-        tx = re.search(r'tgme_widget_message_text[^>]*>(.*?)</div>', blk, re.S)
-        if tx:
-            out.append({"id": int(m.group(1)), "dt": tm.group(1) if tm else None, "raw": tx.group(1)})
-    return out
-
-def fetch_posts(max_pages=3):
-    seen, allp, before = set(), [], None
-    for _ in range(max_pages):
-        url = f"https://t.me/s/{SOURCE}" + (f"?before={before}" if before else "")
-        try: r = requests.get(url, headers=UA, timeout=25)
-        except Exception: break
-        if r.status_code != 200: break
-        page = parse_page(r.text)
-        if not page: break
-        new = [p for p in page if p["id"] not in seen]
-        seen.update(p["id"] for p in new); allp += new
-        mn = min(p["id"] for p in page)
-        if before is not None and mn >= before: break
-        before = mn; time.sleep(1)
-    return allp
-
-def post_date(iso):
+def fetch_databourse_market():
+    """کل بازار از /marketwatch → لیست دیکشنری نمادها"""
+    out = []
     try:
-        dt = datetime.fromisoformat(iso)
-        if dt.tzinfo is None: dt = dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(ZoneInfo("Asia/Tehran")).date()
-    except Exception:
-        return None
+        r = requests.get(f"{DB}/marketwatch", headers=UA, timeout=45)
+        if r.status_code != 200:
+            print("dbmw status:", r.status_code); return out
+        tables = re.findall(r'<table[^>]*>(.*?)</table>', r.text, re.S)
+        if not tables:
+            print("dbmw: no table"); return out
+        rows_raw = re.findall(r'<tr[^>]*>(.*?)</tr>', tables[0], re.S)
+        for rr in rows_raw:
+            cells = [clean(c) for c in re.findall(r'<t[dh][^>]*>(.*?)</t[dh]>', rr, re.S)]
+            sym, plain, paren = split_row(cells)
+            if not sym or len(plain) < 5:
+                continue
+            out.append({"sym": sym, "last": plain[0], "close": plain[1],
+                        "count": plain[2], "vol": plain[3], "val": plain[4],
+                        "chg": paren[0] if paren else None})
+        print(f"marketwatch: {len(out)} نماد")
+    except Exception as e:
+        print("dbmw err:", str(e)[:90])
+    return out
 
+def fetch_smart_money():
+    """قدرت خریداران از فیلتر ورود پول هوشمند → دیکشنری نماد:عدد"""
+    out = {}
+    try:
+        r = requests.get(f"{DB}/filter/smart-money-inflow", headers=UA, timeout=45)
+        if r.status_code != 200:
+            print("dbsm status:", r.status_code); return out
+        tables = re.findall(r'<table[^>]*>(.*?)</table>', r.text, re.S)
+        if not tables: return out
+        rows_raw = re.findall(r'<tr[^>]*>(.*?)</tr>', tables[0], re.S)
+        for rr in rows_raw:
+            cells = [clean(c) for c in re.findall(r'<t[dh][^>]*>(.*?)</t[dh]>', rr, re.S)]
+            sym, plain, paren = split_row(cells)
+            if not sym or len(plain) < 6: continue
+            power = plain[0]
+            if power is not None and power > 0:
+                out[sym] = power
+        print(f"smart-money: {len(out)} نماد")
+    except Exception as e:
+        print("dbsm err:", str(e)[:90])
+    return out
+
+# ───────── غربالگری واقعی ─────────
 def collect():
-    posts = fetch_posts()
-    if not posts: return None, None
-    for p in posts: p["date"] = post_date(p["dt"])
+    """خروجی: (رتبه‌بندی [(نماد، امتیاز)]، تاریخ) بر اساس دادهٔ واقعی دیتابورس"""
+    rows = fetch_databourse_market()
+    if not rows:
+        return None, None
+    smart = fetch_smart_money()
     today = datetime.now(ZoneInfo("Asia/Tehran")).date()
-    dated = [p for p in posts if p["date"]]
-    if not dated: return None, None
-    target = today if any(p["date"] == today for p in dated) else max(p["date"] for p in dated)
-    score, seen_txt = {}, set()
-    for p in (q for q in dated if q["date"] == target):
-        t = clean(p["raw"])
-        if len(t) < 10 or t[:80] in seen_txt: continue
-        seen_txt.add(t[:80])
-        low = t.lower()
-        if any(a in low or a in t for a in AD_WORDS): continue
-        for s in extract_symbols(t):
-            score[s] = score.get(s, 0) + 1
-    return sorted(score.items(), key=lambda kv: -kv[1])[:TOP_N], target
+
+    pool = []
+    for p in rows:
+        if p["count"] is None or p["count"] <= 0:        continue   # بی‌معامله
+        if p["val"]  is None or p["val"]  < MIN_VALUE:   continue   # نقدشوندگی حداقلی
+        if p["last"] is None or p["last"] <= 0:          continue
+        p["sm"] = smart.get(p["sym"])
+        pool.append(p)
+
+    if not pool:
+        return [], today
+
+    def score(p):
+        s = 0.0
+        s += min(25.0, math.log10(max(p["val"], 1)) / 3.5)          # نقدشوندگی (تا ۲۵)
+        if p["chg"] is not None and p["chg"] > 0:                   # رشد قیمت (تا ۲۵)
+            s += min(25.0, p["chg"] * 8)
+        if p["sm"] is not None and p["sm"] >= 1.2:                  # قدرت خریداران (تا ۴۰)
+            s += min(40.0, p["sm"] * 22)
+        else:
+            s -= 5
+        return s
+
+    pool.sort(key=score, reverse=True)
+    ranked = [(p["sym"], round(score(p), 1)) for p in pool[:TOP_N]]
+    return ranked, today
 
 def build_screen(ranked, d):
     if ranked is None:
-        return "⛔ دریافت اطلاعات امروز ناموفق بود؛ در اجرای بعدی خودکار تلاش می‌شود."
+        return "⛔ دریافت دادهٔ بازار ناموفق بود؛ در اجرای بعدی خودکار تلاش می‌شود."
     if not ranked:
-        return f"📋 امروز ({d.isoformat()}) پست فیلتری با نماد مشخص ثبت نشده است."
-    L = ["🎯 غربالگری بورس — نمادهای منتخب", f"📅 {d.isoformat()}", ""]
-    L += [f"{i}. {s}  ×{c}" for i, (s, c) in enumerate(ranked, 1)]
-    L += ["", "🤖 خروجی خودکار است؛ توصیه خرید/فروش نیست."]
+        return f"📋 امروز ({d.isoformat()}) نمادی فیلترها را پاس نکرد."
+    L = ["🎯 غربالگری بورس — نمادهای منتخب", f"📅 {d.isoformat()}", "",
+         "معیارها: نقدشوندگی + رشد قیمت + قدرت خریداران (ورود پول هوشمند)", ""]
+    L += [f"{i}. {s}  — امتیاز {c}" for i, (s, c) in enumerate(ranked, 1)]
+    L += ["", "🔗 جزئیات هر نماد: databourse.ir/symbol/نام‌نماد",
+          "🤖 خروجی خودکار است؛ توصیه خرید/فروش نیست."]
     return "\n".join(L)
 
-# ───────── دیتابورس: دادهٔ نماد ─────────
+# ───────── دیتابورس: تاریخچهٔ نماد (برای /c و /d) ─────────
 def extract_js_arrays(html_text):
-    """همهٔ آرایه‌های let/var/const X = [...] را با براکت‌شمار بیرون می‌کشد"""
+    """همهٔ آرایه‌های let/var/const X = [...] با براکت‌شمار → JSON"""
     arrays = {}
     for m in re.finditer(r'\b(?:let|var|const)\s+(\w+)\s*=\s*\[', html_text):
         name = m.group(1)
@@ -305,12 +333,11 @@ def extract_js_arrays(html_text):
     return arrays
 
 def fetch_symbol(sym):
-    """صفحهٔ نماد دیتابورس → (آرایه‌های داده، نام شرکت)"""
     enc = urllib.parse.quote(sym, safe='')
     try:
         r = requests.get(f"{DB}/symbol/{enc}", headers=UA, timeout=30)
     except requests.RequestException as e:
-        print("db err:", str(e)[:90]); return None, None
+        print("db sym err:", str(e)[:90]); return None, None
     if r.status_code != 200 or len(r.content) < 5000:
         return None, None
     h = r.text
@@ -320,7 +347,6 @@ def fetch_symbol(sym):
     return extract_js_arrays(h), company
 
 def pick_series(arrays):
-    # اول OHLC، بعد سری value
     for name, arr in arrays.items():
         if arr and ("close" in arr[0] or "c" in arr[0]):
             return name, arr, True
@@ -334,17 +360,17 @@ def series_from(arr):
     for it in arr:
         d = str(it.get("date", "")).strip()
         ks = set(it.keys())
-        if "close" in ks or "c" in ks:
-            try:
-                o = float(it.get("open")  or it.get("o"))
-                h_ = float(it.get("high") or it.get("h"))
-                l_ = float(it.get("low")  or it.get("l"))
+        try:
+            if "close" in ks or "c" in ks:
+                o  = float(it.get("open")  or it.get("o"))
+                h_ = float(it.get("high")  or it.get("h"))
+                l_ = float(it.get("low")   or it.get("l"))
                 c_ = float(it.get("close") or it.get("c"))
                 pts.append({"d": d, "o": o, "h": h_, "l": l_, "c": c_})
-            except (TypeError, ValueError): continue
-        elif "value" in ks or "v" in ks:
-            try: pts.append({"d": d, "c": float(it.get("value", it.get("v")))})
-            except (TypeError, ValueError): continue
+            elif "value" in ks or "v" in ks:
+                pts.append({"d": d, "c": float(it.get("value", it.get("v")))})
+        except (TypeError, ValueError):
+            continue
     return pts
 
 def rsi14(closes, n=14):
@@ -547,7 +573,7 @@ def listen():
             updates = get_updates(offset=offset, timeout=50)
             if updates:
                 last = max(u.get("update_id", 0) for u in updates)
-                get_updates(offset=last + 1, timeout=0)
+                get_updates(offset=last + 1, timeout=0)   # تأیید فوری
                 offset = last + 1
                 for u in updates:
                     try: handle_update(u)
@@ -557,6 +583,7 @@ def listen():
         except Exception as e:
             print("listen err:", str(e)[:120]); time.sleep(5)
 
+# ───────── اجرا ─────────
 if __name__ == "__main__":
     if RUN_MODE == "listen":
         listen()
