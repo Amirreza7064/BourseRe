@@ -264,7 +264,7 @@ def fetch_smart_money():
 
 # ───────── غربالگری واقعی (تیون‌شده) ─────────
 def collect():
-    """خروجی: (رتبه‌بندی [(نماد، امتیاز)]، تاریخ)"""
+    """خروجی: (رتبه‌بندی غنی، تاریخ)"""
     rows = fetch_databourse_market()
     if not rows:
         return None, None
@@ -273,8 +273,8 @@ def collect():
 
     pool = []
     for p in rows:
-        if p["count"] is None or p["count"] <= 0:        continue   # بی‌معامله
-        if p["val"]  is None or p["val"]  < MIN_VALUE:   continue   # نقدشوندگی حداقلی
+        if p["count"] is None or p["count"] <= 0:        continue
+        if p["val"]  is None or p["val"]  < MIN_VALUE:   continue
         if p["last"] is None or p["last"] <= 0:          continue
         p["sm"] = smart.get(p["sym"])
         pool.append(p)
@@ -283,25 +283,21 @@ def collect():
         return [], today
 
     vmax = max((p["val"] for p in pool), default=1) or 1
-    dmax = max((p["chg"] for p in pool if p["chg"] is not None), default=0)
 
     def score(p):
         s = 0.0
-        # ۱) نقدشوندگی نرمال‌شده نسبت به بزرگ‌ترین ارزش روز (تا ۳۰)
         s += 30.0 * (math.log10(p["val"] + 10) / math.log10(vmax + 10))
-        # ۲) رشد قیمت (تا ۳۰) — مثبت سالم امتیاز کامل‌تر می‌گیرد
         if p["chg"] is not None:
             if p["chg"] > 0:
                 s += min(30.0, 15.0 + p["chg"] * 4)
             elif p["chg"] > -1.0:
                 s += 7.0
-        # ۳) قدرت خریداران (تا ۴۰) — نبود داده = خنثی
         if p["sm"] is not None and p["sm"] >= 1.2:
             s += min(40.0, 15.0 + (p["sm"] - 1.2) * 60)
         return s
 
     pool.sort(key=score, reverse=True)
-    ranked = [(p["sym"], round(score(p), 1)) for p in pool[:TOP_N]]
+    ranked = [(p["sym"], round(score(p), 1), p["chg"], p["sm"]) for p in pool[:TOP_N]]
     return ranked, today
 
 def build_screen(ranked, d):
@@ -311,7 +307,13 @@ def build_screen(ranked, d):
         return f"📋 امروز ({d.isoformat()}) نمادی فیلترها را پاس نکرد."
     L = ["🎯 غربالگری بورس — نمادهای منتخب", f"📅 {d.isoformat()}", "",
          "معیارها: نقدشوندگی + رشد قیمت + قدرت خریداران (ورود پول هوشمند)", ""]
-    L += [f"{i}. {s}  — امتیاز {c}" for i, (s, c) in enumerate(ranked, 1)]
+    for i, item in enumerate(ranked, 1):
+        sym, sc, chg, sm = item[0], item[1], item[2], item[3]
+        parts = []
+        if chg is not None: parts.append(f"قیمت {chg:+.1f}%")
+        if sm is not None:  parts.append(f"قدرت خریدار {sm:.2f}")
+        extra = f"  ({' | '.join(parts)})" if parts else ""
+        L.append(f"{i}. {sym} — امتیاز {sc}{extra}")
     L += ["", "🔗 جزئیات هر نماد: databourse.ir/symbol/نام‌نماد",
           "🤖 خروجی خودکار است؛ توصیه خرید/فروش نیست."]
     return "\n".join(L)
