@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-"""فایل: bot.py — سرخطی + غربالگری دیتابورس + /c چارت + /d سطوح + /e حکم خرید/نگهداری/فروش
-منابع: databourse.ir + tgju + بورس‌پرس | حالت‌ها: morning|afternoon|both|poll|listen"""
+"""فایل: bot.py — سرخطی + غربالگری دیتابورس + /c چارت + /d سطوح + /e حکم
++ دکمه‌های دستور (setMyCommands) + حالت انتظار نماد (بدون تایپ دستور)
+حالت‌ها: morning | afternoon | both | poll | listen"""
 
 import os, re, io, sys, html, math, time
 import urllib.parse
@@ -18,6 +19,7 @@ API_URL     = f"{BASE}/sendMessage"
 EDIT_URL    = f"{BASE}/editMessageText"
 PHOTO_URL   = f"{BASE}/sendPhoto"
 UPDATES_URL = f"{BASE}/getUpdates"
+CMDS_URL    = f"{BASE}/setMyCommands"
 UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"}
 
 DB = "https://databourse.ir"
@@ -27,6 +29,7 @@ NEWS_LIMIT = 10
 MAXLEN     = 3900
 MIN_VALUE  = 2_000
 SEND_RESULT_AS_NEW = True
+PENDING_TTL = 600            # ثانیه اعتبار حالت انتظار نماد
 
 RUN_MODE = os.environ.get("RUN_MODE", "both").strip().lower()
 
@@ -76,6 +79,22 @@ def send_ack(chat_id, text):
     except requests.RequestException as e:
         print("ack err:", str(e)[:90])
     return None
+
+def register_commands():
+    """ثبت دکمه‌های دستور در منوی بله"""
+    payload = {"commands": [
+        {"command": "/a", "description": "🌅 سرخطی و اخبار بورس"},
+        {"command": "/b", "description": "🎯 غربالگری نمادهای منتخب"},
+        {"command": "/c", "description": "📊 سیگنال نموداری — مثال: /c فولاد"},
+        {"command": "/d", "description": "🧭 سطوح ورود و خروج — مثال: /d فملی"},
+        {"command": "/e", "description": "⚖️ حکم خرید/نگهداری/فروش — مثال: /e وبملت"},
+        {"command": "/help", "description": "❓ راهنما"},
+    ]}
+    try:
+        r = requests.post(CMDS_URL, json=payload, timeout=20)
+        print("setMyCommands:", r.status_code, r.text[:100])
+    except requests.RequestException as e:
+        print("setMyCommands err:", str(e)[:90])
 
 # ───────── ابزار متن ─────────
 def clean(s):
@@ -256,7 +275,7 @@ def fetch_smart_money():
         print("dbsm err:", str(e)[:90])
     return out
 
-# ───────── غربالگری (/b) — نسخهٔ غنی‌شده ─────────
+# ───────── غربالگری (/b) ─────────
 def collect():
     rows = fetch_databourse_market()
     if not rows:
@@ -311,7 +330,80 @@ def build_screen(ranked, d):
           "🤖 خروجی خودکار است؛ توصیه خرید/فروش نیست."]
     return "\n".join(L)
 
-# ───────── دیتابورس: تاریخچهٔ نماد ─────────
+# ───────── دیتابورس: صفحهٔ نماد (مقاوم) ─────────
+def sym_variants(s):
+    out, seen = [], set()
+    def push(x):
+        x = (x or "").strip().strip("«»'\"،,()").strip()
+        if x and x not in seen:
+            seen.add(x); out.append(x)
+    base = normalize(s)
+    push(s); push(base)
+    push(base.replace("ک", "ك").replace("ی", "ي"))
+    push(base.replace("ی", "ي"))
+    push(base.replace("ک", "ك"))
+    return out
+
+def search_symbol_page(sym):
+    for param in ("q", "term", "s"):
+        try:
+            r = requests.get(f"{DB}/api/search", params={param: sym}, headers=UA, timeout=15)
+            if r.status_code == 200 and len(r.content) > 50:
+                m = re.search(r'"(?:url|link|slug)"\s*:\s*"([^"]*symbol[^"]*)"', r.text)
+                if m:
+                    u = m.group(1)
+                    return u if u.startswith("http") else DB + (u if u.startswith("/") else "/" + u)
+                m = re.search(r'href="(/symbol/[^"]+)"', r.text)
+                if m: return DB + m.group(1)
+        except Exception:
+            continue
+    try:
+        r = requests.get(f"{DB}/search", params={"q": sym}, headers=UA, timeout=15)
+        if r.status_code == 200:
+            m = re.search(r'href="(/symbol/[^"]+)"', r.text)
+            if m: return DB + m.group(1)
+    except Exception:
+        pass
+    return None
+
+def _company_from(html_text):
+    m = re.search(r'"name":\s*"[^"]+?\s*\(([^)]+)\)', html_text)
+    return m.group(1).strip() if m else None
+
+def fetch_symbol(sym):
+    last_err = "notfound"
+    for v in sym_variants(sym):
+        enc = urllib.parse.quote(v, safe='')
+        for attempt in (1, 2):
+            try:
+                r = requests.get(f"{DB}/symbol/{enc}", headers=UA, timeout=35)
+            except requests.RequestException as e:
+                print("db sym net:", str(e)[:80]); last_err = "network"; time.sleep(1.5); continue
+            if r.status_code == 200 and len(r.content) > 5000:
+                arrays = extract_js_arrays(r.text)
+                if arrays:
+                    return arrays, _company_from(r.text), None
+                last_err = "nodata"
+                break
+            elif r.status_code == 404:
+                last_err = "notfound"
+                break
+            else:
+                last_err = "notfound"
+                time.sleep(1.5)
+    url = search_symbol_page(sym)
+    if url:
+        try:
+            r = requests.get(url, headers=UA, timeout=35)
+            if r.status_code == 200 and len(r.content) > 5000:
+                arrays = extract_js_arrays(r.text)
+                if arrays:
+                    return arrays, _company_from(r.text), None
+                last_err = "nodata"
+        except Exception:
+            pass
+    return None, None, last_err
+
 def extract_js_arrays(html_text):
     arrays = {}
     for m in re.finditer(r'\b(?:let|var|const)\s+(\w+)\s*=\s*\[', html_text):
@@ -340,20 +432,6 @@ def extract_js_arrays(html_text):
                 pass
     return arrays
 
-def fetch_symbol(sym):
-    enc = urllib.parse.quote(sym, safe='')
-    try:
-        r = requests.get(f"{DB}/symbol/{enc}", headers=UA, timeout=30)
-    except requests.RequestException as e:
-        print("db sym err:", str(e)[:90]); return None, None
-    if r.status_code != 200 or len(r.content) < 5000:
-        return None, None
-    h = r.text
-    company = None
-    m = re.search(r'"name":\s*"[^"]+?\s*\(([^)]+)\)', h)
-    if m: company = m.group(1).strip()
-    return extract_js_arrays(h), company
-
 def pick_series(arrays):
     for name, arr in arrays.items():
         if arr and ("close" in arr[0] or "c" in arr[0]):
@@ -380,6 +458,16 @@ def series_from(arr):
         except (TypeError, ValueError):
             continue
     return pts
+
+def symbol_error_msg(sym, err):
+    if err == "nodata":
+        return (f"⛔ صفحهٔ «{sym}» در دیتابورس موجود است ولی دادهٔ تاریخی برای آن منتشر نشده است.\n"
+                f"(نمادهای تازه‌وارد یا کم‌معامله ممکن است تاریخچه نداشته باشند)")
+    if err == "network":
+        return "⛔ ارتباط با دیتابورس برقرار نشد؛ کمی بعد دوباره امتحان کنید."
+    return (f"❓ نماد «{sym}» در دیتابورس پیدا نشد.\n"
+            f"• املای نماد را چک کنید (نمادِ کوتاه فارسی، مثل: فولاد)\n"
+            f"• برخی نمادها در پوشش دیتابورس نیستند")
 
 def rsi14(closes, n=14):
     if len(closes) < n + 1: return 50.0
@@ -440,9 +528,9 @@ def _plot(pts, sym, company, ohlc):
     return buf, cap
 
 def build_chart(sym):
-    arrays, company = fetch_symbol(sym)
+    arrays, company, err = fetch_symbol(sym)
     if arrays is None:
-        return None, f"❓ نماد «{sym}» در دیتابورس پیدا نشد (املای نماد را چک کنید)."
+        return None, symbol_error_msg(sym, err)
     _, arr, ohlc = pick_series(arrays)
     if not arr:
         return None, f"⛔ دادهٔ تاریخی برای «{sym}» ثبت نشده است."
@@ -452,9 +540,9 @@ def build_chart(sym):
     return _plot(pts, sym, company, ohlc)
 
 def build_levels(sym):
-    arrays, company = fetch_symbol(sym)
+    arrays, company, err = fetch_symbol(sym)
     if arrays is None:
-        return f"❓ نماد «{sym}» در دیتابورس پیدا نشد (املای نماد را چک کنید)."
+        return symbol_error_msg(sym, err)
     _, arr, _ = pick_series(arrays)
     if not arr:
         return f"⛔ دادهٔ تاریخی برای «{sym}» ثبت نشده است."
@@ -482,11 +570,10 @@ def build_levels(sym):
         "⚠️ سطوح کلاسیک تکنیکال است؛ تضمین نیست و توصیه خرید/فروش نیست.",
         "منبع داده: دیتابورس"])
 
-# ───────── /e: داور تکنیکال (خرید / نگهداری / فروش) ─────────
 def build_verdict(sym):
-    arrays, company = fetch_symbol(sym)
+    arrays, company, err = fetch_symbol(sym)
     if arrays is None:
-        return f"❓ نماد «{sym}» در دیتابورس پیدا نشد (املای نماد را چک کنید)."
+        return symbol_error_msg(sym, err)
     _, arr, _ = pick_series(arrays)
     if not arr:
         return f"⛔ دادهٔ تاریخی برای «{sym}» ثبت نشده است."
@@ -501,8 +588,8 @@ def build_verdict(sym):
     sup, res = min(closes[-60:]), max(closes[-60:])
     r20 = closes[-1] / closes[-21] - 1 if len(closes) >= 21 else 0.0
     m5  = closes[-1] / closes[-6] - 1 if len(closes) >= 6 else 0.0
-    dist_res = res / last - 1          # چقدر تا سقف ۶۰ روزه
-    dist_sup = last / sup - 1          # چقدر بالای کف ۶۰ روزه
+    dist_res = res / last - 1
+    dist_sup = last / sup - 1
 
     signals, total = [], 0.0
     def add(ok, neutral, txt, pts_):
@@ -511,31 +598,24 @@ def build_verdict(sym):
         signals.append(f"{mark} {txt} ({pts_:+.0f})")
         total += pts_
 
-    # ۱) قیمت در برابر MA20
     if last >= ma20: add(True,  False, f"قیمت بالای MA20 ({fmt(ma20)})", 15)
     else:            add(False, False, f"قیمت زیر MA20 ({fmt(ma20)})", -10)
-    # ۲) ساختار MA
     if ma50 is not None:
         if ma20 >= ma50: add(True,  False, "MA20 بالای MA50 — روند ساختاری صعودی", 15)
         else:            add(False, False, "MA20 زیر MA50 — روند ساختاری نزولی", -10)
-    # ۳) روند ۲۰ روزه
     if r20 > 0.05:    add(True,  False, f"روند ۲۰ روزه قوی ({r20*100:+.1f}%)", 15)
     elif r20 >= 0:    add(True,  False, f"روند ۲۰ روزه ملایم ({r20*100:+.1f}%)", 8)
     elif r20 > -0.05: add(False, True,  f"روند ۲۰ روزه خنثی ({r20*100:+.1f}%)", -5)
     else:             add(False, False, f"روند ۲۰ روزه ضعیف ({r20*100:+.1f}%)", -15)
-    # ۴) RSI
     if r >= 75:       add(False, False, f"RSI {r:.0f} — اشباع خرید", -15)
     elif r >= 65:     add(False, True,  f"RSI {r:.0f} — نزدیک اشباع خرید", 5)
     elif r >= 45:     add(True,  False, f"RSI {r:.0f} — مومنتوم سالم", 15)
     elif r >= 30:     add(True,  False, f"RSI {r:.0f} — ناحیهٔ فرصت", 12)
     else:             add(False, True,  f"RSI {r:.0f} — اشباع فروش (ریسک/فرصت)", 8)
-    # ۵) فاصله تا مقاومت
-    if dist_res >= 0.10: add(True,  False, f"تا مقاومت ۶۰روزه {dist_res*100:.0f}% فاصله — جای رشد", 10)
+    if dist_res >= 0.10:   add(True,  False, f"تا مقاومت ۶۰روزه {dist_res*100:.0f}% فاصله — جای رشد", 10)
     elif dist_res >= 0.03: add(True, False, f"تا مقاومت {dist_res*100:.0f}%", 5)
-    else:                add(False, False, f"چسبیده به مقاومت ۶۰روزه ({dist_res*100:.1f}%)", -8)
-    # ۶) نزدیکی حمایت
-    if dist_sup <= 0.05: add(True, False, f"نزدیک حمایت ۶۰روزه ({dist_sup*100:.1f}%)", 8)
-    # ۷) مومنتوم ۵ روزه
+    else:                  add(False, False, f"چسبیده به مقاومت ۶۰روزه ({dist_res*100:.1f}%)", -8)
+    if dist_sup <= 0.05:   add(True, False, f"نزدیک حمایت ۶۰روزه ({dist_sup*100:.1f}%)", 8)
     if m5 > 0:        add(True,  False, f"مومنتوم ۵ روزه مثبت ({m5*100:+.1f}%)", 10)
     elif m5 > -0.02:  add(False, True,  f"مومنتوم ۵ روزه خنثی ({m5*100:+.1f}%)", 0)
     else:             add(False, False, f"مومنتوم ۵ روزه منفی ({m5*100:+.1f}%)", -8)
@@ -557,8 +637,10 @@ def build_verdict(sym):
           "منبع داده: دیتابورس"]
     return "\n".join(L)
 
-# ───────── دستورها ─────────
-CMD_MAP = {"a": "news", "b": "screen", "c": "chart", "d": "levels", "e": "verdict"}
+# ───────── دستورها و حالت انتظار ─────────
+CMD_MAP  = {"a": "news", "b": "screen", "c": "chart", "d": "levels", "e": "verdict"}
+CMD_LETTER = {"chart": "c", "levels": "d", "verdict": "e"}
+NEEDS_SYM = ("chart", "levels", "verdict")
 USAGE = ("🤖 دستورها:\n"
          "/a — سرخطی و اخبار\n"
          "/b — غربالگری نمادهای منتخب\n"
@@ -566,68 +648,125 @@ USAGE = ("🤖 دستورها:\n"
          "/d نماد — سطوح ورود و خروج (مثال: /d فملی)\n"
          "/e نماد — حکم خرید/نگهداری/فروش (مثال: /e وبملت)")
 
+PENDING = {}   # chat_id(str) → {"cmd":..., "ts":...}  حالت انتظار نماد
+
 def parse_cmd(text):
     t = text.strip()
     if t == "/اخبار": return "news", ""
     if t == "/غربال": return "screen", ""
+    if t in ("/cancel", "/لغو"): return "cancel", ""
     if t in ("/help", "/start"): return "help", ""
     m = re.match(r"^/([a-eA-E])(?:\s+(.+))?$", t)
     if m:
-        arg = (m.group(2) or "").strip().strip("«»'\"،, ")
+        raw = (m.group(2) or "").strip().strip("«»'\"،, ")
+        tokens = raw.split()
+        arg = tokens[0] if tokens else ""
         return CMD_MAP.get(m.group(1).lower()), arg
     return None, ""
 
+def run_simple(chat, cmd):
+    """دستورهای بدون نماد — خروجی: (متن، یا None برای چارت)"""
+    if cmd == "news":
+        return build_headline()
+    ranked, d = collect()
+    return build_screen(ranked, d)
+
+def run_symbol(chat, cmd, sym, ack_id):
+    """دستورهای نماددار؛ برای chart خروجی None و ارسال مستقیم عکس"""
+    if cmd == "chart":
+        buf, caption = build_chart(sym)
+        if buf is None:
+            send_to(chat, caption, msg_id=ack_id); return
+        ok = send_photo(chat, buf, caption)
+        send_to(chat, "✅ سیگنال آماده و ارسال شد." if ok else "⚠️ ارسال تصویر ناموفق؛ نسخهٔ متنی:",
+                msg_id=ack_id)
+        if not ok: send_to(chat, caption)
+        return
+    if cmd == "levels":
+        result = build_levels(sym)
+    else:
+        result = build_verdict(sym)
+    if ack_id: send_to(chat, result, msg_id=ack_id)
+    else:      send_to(chat, result)
+
 def handle_update(u):
+    global PENDING
     msg  = u.get("message") or {}
     chat = (msg.get("chat") or {}).get("id")
     text = (msg.get("text") or "").strip()
     if not chat or str(chat) != str(BALE_CHAT_ID): return False
+    key = str(chat)
+
     cmd, arg = parse_cmd(text)
-    if not cmd: return False
-    if cmd == "help":
-        send_to(chat, USAGE); return True
-    ack_text = {"news": "🔎 در حال دریافت اخبار و جمع‌آوری داده‌های بورسی...",
-                "screen": "📈 درحال تحلیل بازار بورسی...",
-                "chart": f"📊 در حال ساخت سیگنال «{arg}»...",
-                "levels": f"🧭 در حال محاسبهٔ سطوح «{arg}»...",
-                "verdict": f"⚖️ در حال ارزیابی وضعیت «{arg}»..."}.get(cmd, "⏳ در حال پردازش...")
-    ack_id = send_ack(chat, ack_text)
-    try:
-        if cmd == "news":
-            result = build_headline()
-        elif cmd == "screen":
-            ranked, d = collect()
-            result = build_screen(ranked, d)
-        elif cmd in ("chart", "levels", "verdict"):
+
+    # دستورها
+    if cmd:
+        if cmd == "help":
+            send_to(chat, USAGE); return True
+        if cmd == "cancel":
+            PENDING.pop(key, None)
+            send_to(chat, "بایت لغو شد. دستور جدید بفرستید."); return True
+        if cmd in ("news", "screen"):
+            PENDING.pop(key, None)
+            ack_id = send_ack(chat, ACK_TEXT.get(cmd, "⏳ در حال پردازش..."))
+            try:
+                result = run_simple(chat, cmd)
+                if ack_id: send_to(chat, result, msg_id=ack_id)
+                else:      send_to(chat, result)
+                if SEND_RESULT_AS_NEW and ack_id:
+                    send_to(chat, "📩 " + result.splitlines()[0])
+            except Exception as e:
+                print("cmd err:", str(e)[:150])
+                send_to(chat, "⛔ خطا در اجرا؛ لطفاً دوباره امتحان کنید.", msg_id=ack_id)
+            return True
+        if cmd in NEEDS_SYM:
+            PENDING.pop(key, None)
             if not arg:
-                send_to(chat, "❓ اسم نماد را جلوی دستور بنویسید. مثال: /c فولاد", msg_id=ack_id)
+                PENDING[key] = {"cmd": cmd, "ts": time.time()}
+                letter = CMD_LETTER[cmd]
+                send_to(chat, f"❗ نام نماد مورد نظر را وارد کنید (فقط نام نماد).\n"
+                              f"مثال: فولاد\n\nبرای لغو: /cancel")
                 return True
-            if cmd == "chart":
-                buf, caption = build_chart(arg)
-                if buf is None:
-                    send_to(chat, caption, msg_id=ack_id); return True
-                ok = send_photo(chat, buf, caption)
-                send_to(chat, "✅ سیگنال آماده و ارسال شد." if ok else "⚠️ ارسال تصویر ناموفق؛ نسخهٔ متنی:",
-                        msg_id=ack_id)
-                if not ok: send_to(chat, caption)
-                return True
-            elif cmd == "levels":
-                result = build_levels(arg)
-            else:
-                result = build_verdict(arg)
-        else:
-            return False
-        if ack_id: send_to(chat, result, msg_id=ack_id)
-        else:      send_to(chat, result)
-        if SEND_RESULT_AS_NEW and ack_id and cmd in ("news", "screen"):
-            send_to(chat, "📩 " + result.splitlines()[0])
-        return True
-    except Exception as e:
-        print("cmd err:", str(e)[:150])
-        body = "⛔ خطا در اجرا؛ لطفاً دوباره امتحان کنید."
-        if ack_id: send_to(chat, body, msg_id=ack_id)
-        else:      send_to(chat, body)
+            ack_id = send_ack(chat, ACK_TEXT.get(cmd, "⏳").format(arg=arg))
+            try:
+                run_symbol(chat, cmd, arg, ack_id)
+            except Exception as e:
+                print("cmd err:", str(e)[:150])
+                send_to(chat, "⛔ خطا در اجرا؛ لطفاً دوباره امتحان کنید.", msg_id=ack_id)
+            return True
         return False
+
+    # پیام عادی (بدون /): اگر در حالت انتظار نماد هستیم → به‌عنوان نماد اجرا کن
+    p = PENDING.get(key)
+    if p and (time.time() - p["ts"]) <= PENDING_TTL:
+        sym = text.strip().strip("«»'\"،,()")
+        if not sym or sym.startswith("/"):
+            return False
+        cmd = p["cmd"]
+        PENDING.pop(key, None)
+        ack_id = send_ack(chat, ACK_TEXT.get(cmd, "⏳").format(arg=sym))
+        try:
+            run_symbol(chat, cmd, sym, ack_id)
+        except Exception as e:
+            print("pending err:", str(e)[:150])
+            send_to(chat, "⛔ خطا در اجرا؛ لطفاً دوباره امتحان کنید.", msg_id=ack_id)
+        return True
+    if p:   # منقضی شده
+        PENDING.pop(key, None)
+        send_to(chat, "⌛ وقت وارد کردن نماد تمام شد؛ دوباره دستور را بفرستید.")
+        return True
+
+    # پیام ناشناختهٔ عادی
+    send_to(chat, "🤖 برای شروع از دکمه‌های دستور استفاده کنید:\n/a سرخطی | /b غربالگری | /c /d /e + نام نماد")
+    return True
+
+ACK_TEXT = {
+    "news":   "🔎 در حال دریافت اخبار و جمع‌آوری داده‌های بورسی...",
+    "screen": "📈 درحال تحلیل بازار بورسی...",
+    "chart":  "📊 در حال ساخت سیگنال «{arg}»...",
+    "levels": "🧭 در حال محاسبهٔ سطوح «{arg}»...",
+    "verdict": "⚖️ در حال ارزیابی وضعیت «{arg}»...",
+}
 
 def get_updates(offset=None, timeout=0):
     params = {"timeout": timeout}
@@ -642,6 +781,7 @@ def get_updates(offset=None, timeout=0):
     return []
 
 def poll_and_respond():
+    register_commands()
     updates = get_updates()
     if not updates:
         print("دستور جدیدی نیست"); return
@@ -654,6 +794,7 @@ def poll_and_respond():
     print(f"دستورها: {done}")
 
 def listen():
+    register_commands()
     print("🎧 شنودگر فعال شد — گوش می‌دهم...")
     offset = None
     while True:
@@ -678,6 +819,7 @@ if __name__ == "__main__":
     elif RUN_MODE == "poll":
         poll_and_respond()
     else:
+        register_commands()
         if RUN_MODE in ("morning", "both"):
             try:
                 send(build_headline()); print("🌅 سرخطی ارسال شد")
