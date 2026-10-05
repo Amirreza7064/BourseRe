@@ -3,7 +3,6 @@ name: bale-listener
 on:
   workflow_dispatch: {}
 
-# هر بار اجرای جدید، اجرای قبلی خاموش می‌شود (فقط یک شنودگر زنده)
 concurrency:
   group: bale-listener
   cancel-in-progress: true
@@ -11,13 +10,13 @@ concurrency:
 jobs:
   listen:
     runs-on: ubuntu-latest
-    timeout-minutes: 350        # ~۵ ساعت و ۵۰ دقیقه (سقف امن زیر ۶ ساعت)
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install -q requests
+      - run: pip install -q -r requirements.txt
       - run: python -u bot.py
         env:
           BALE_TOKEN: ${{ secrets.BALE_TOKEN }}
