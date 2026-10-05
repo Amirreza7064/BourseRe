@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
-"""فایل: bot.py — سرخطی + غربالگری واقعی دیتابورس + /c نماد (چارت) + /d نماد (سطوح)
-منابع: databourse.ir (بازار/پول‌هوشمند/تاریخچه) + tgju + بورس‌پرس
-حالت‌ها: morning | afternoon | both | poll | listen"""
+"""فایل: bot.py — سرخطی + غربالگری دیتابورس + /c چارت + /d سطوح + /e حکم خرید/نگهداری/فروش
+منابع: databourse.ir + tgju + بورس‌پرس | حالت‌ها: morning|afternoon|both|poll|listen"""
 
 import os, re, io, sys, html, math, time
 import urllib.parse
@@ -21,15 +20,15 @@ PHOTO_URL   = f"{BASE}/sendPhoto"
 UPDATES_URL = f"{BASE}/getUpdates"
 UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"}
 
-DB = "https://databourse.ir"          # منبع دادهٔ نمادها — باز از خارج از ایران
+DB = "https://databourse.ir"
 
 TOP_N      = 25
 NEWS_LIMIT = 10
 MAXLEN     = 3900
-MIN_VALUE  = 2_000        # حداقل ارزش معاملات (میلیون ریال) ≈ ۲۰۰ میلیون تومان
+MIN_VALUE  = 2_000
 SEND_RESULT_AS_NEW = True
 
-RUN_MODE = os.environ.get("RUN_MODE", "both").strip().lower()   # morning|afternoon|both|poll|listen
+RUN_MODE = os.environ.get("RUN_MODE", "both").strip().lower()
 
 # ───────── ارسال ─────────
 def send_to(chat_id, text, msg_id=None):
@@ -111,7 +110,7 @@ def to_num(s):
     v = float(m.group())
     return -v if neg and v > 0 else v
 
-# ───────── سرخطی (tgju + بورس‌پرس) ─────────
+# ───────── سرخطی ─────────
 def fetch_market():
     cur = {}
     try:
@@ -187,11 +186,8 @@ def build_headline():
             body += block + "\n".join(items)
     return body
 
-# ───────── دیتابورس: پارس جدول‌های SSR ─────────
+# ───────── دیتابورس: پارس جدول‌ها ─────────
 def split_row(cells):
-    """ردیف جدول → (نماد، اعداد ساده به‌ترتیب، درصدهای پرانتزی به‌ترتیب)
-    marketwatch:  [نماد، آخرین، (درصد)، پایانی، (درصد)، تعداد، حجم، ارزش]
-    smart-money:  [نماد، قدرت، آخرین، (درصد)، پایانی، (درصد)، تعداد، حجم، ارزش]"""
     if not cells: return None, [], []
     sym = normalize(cells[0].strip())
     if not (3 <= len(sym) <= 15) or not re.search(r'[\u0600-\u06FF]', sym):
@@ -216,7 +212,6 @@ def cells_of(row_html):
     return [clean(c) for c in re.findall(r'<t[dh][^>]*>(.*?)</t[dh]>', row_html, re.S)]
 
 def fetch_databourse_market():
-    """کل بازار از /marketwatch → لیست دیکشنری نمادها"""
     out = []
     try:
         r = requests.get(f"{DB}/marketwatch", headers=UA, timeout=45)
@@ -236,7 +231,6 @@ def fetch_databourse_market():
     return out
 
 def fetch_smart_money():
-    """قدرت خریداران — صفحهٔ ۱ (SSR) + تلاش برای صفحات بعدی → دیکشنری نماد:عدد"""
     out = {}
     try:
         urls = [f"{DB}/filter/smart-money-inflow",
@@ -262,9 +256,8 @@ def fetch_smart_money():
         print("dbsm err:", str(e)[:90])
     return out
 
-# ───────── غربالگری واقعی (تیون‌شده) ─────────
+# ───────── غربالگری (/b) — نسخهٔ غنی‌شده ─────────
 def collect():
-    """خروجی: (رتبه‌بندی غنی، تاریخ)"""
     rows = fetch_databourse_market()
     if not rows:
         return None, None
@@ -318,7 +311,7 @@ def build_screen(ranked, d):
           "🤖 خروجی خودکار است؛ توصیه خرید/فروش نیست."]
     return "\n".join(L)
 
-# ───────── دیتابورس: تاریخچهٔ نماد (/c و /d) ─────────
+# ───────── دیتابورس: تاریخچهٔ نماد ─────────
 def extract_js_arrays(html_text):
     arrays = {}
     for m in re.finditer(r'\b(?:let|var|const)\s+(\w+)\s*=\s*\[', html_text):
@@ -489,20 +482,96 @@ def build_levels(sym):
         "⚠️ سطوح کلاسیک تکنیکال است؛ تضمین نیست و توصیه خرید/فروش نیست.",
         "منبع داده: دیتابورس"])
 
+# ───────── /e: داور تکنیکال (خرید / نگهداری / فروش) ─────────
+def build_verdict(sym):
+    arrays, company = fetch_symbol(sym)
+    if arrays is None:
+        return f"❓ نماد «{sym}» در دیتابورس پیدا نشد (املای نماد را چک کنید)."
+    _, arr, _ = pick_series(arrays)
+    if not arr:
+        return f"⛔ دادهٔ تاریخی برای «{sym}» ثبت نشده است."
+    pts = series_from(arr)
+    if len(pts) < 55:
+        return "⛔ دادهٔ کافی برای ارزیابی این نماد نیست."
+    closes = [p["c"] for p in pts]
+    last   = closes[-1]
+    ma20   = avg(closes[-20:])
+    ma50   = avg(closes[-50:]) if len(closes) >= 50 else None
+    r      = rsi14(closes)
+    sup, res = min(closes[-60:]), max(closes[-60:])
+    r20 = closes[-1] / closes[-21] - 1 if len(closes) >= 21 else 0.0
+    m5  = closes[-1] / closes[-6] - 1 if len(closes) >= 6 else 0.0
+    dist_res = res / last - 1          # چقدر تا سقف ۶۰ روزه
+    dist_sup = last / sup - 1          # چقدر بالای کف ۶۰ روزه
+
+    signals, total = [], 0.0
+    def add(ok, neutral, txt, pts_):
+        nonlocal total
+        mark = "✅" if ok else ("➖" if neutral else "❌")
+        signals.append(f"{mark} {txt} ({pts_:+.0f})")
+        total += pts_
+
+    # ۱) قیمت در برابر MA20
+    if last >= ma20: add(True,  False, f"قیمت بالای MA20 ({fmt(ma20)})", 15)
+    else:            add(False, False, f"قیمت زیر MA20 ({fmt(ma20)})", -10)
+    # ۲) ساختار MA
+    if ma50 is not None:
+        if ma20 >= ma50: add(True,  False, "MA20 بالای MA50 — روند ساختاری صعودی", 15)
+        else:            add(False, False, "MA20 زیر MA50 — روند ساختاری نزولی", -10)
+    # ۳) روند ۲۰ روزه
+    if r20 > 0.05:    add(True,  False, f"روند ۲۰ روزه قوی ({r20*100:+.1f}%)", 15)
+    elif r20 >= 0:    add(True,  False, f"روند ۲۰ روزه ملایم ({r20*100:+.1f}%)", 8)
+    elif r20 > -0.05: add(False, True,  f"روند ۲۰ روزه خنثی ({r20*100:+.1f}%)", -5)
+    else:             add(False, False, f"روند ۲۰ روزه ضعیف ({r20*100:+.1f}%)", -15)
+    # ۴) RSI
+    if r >= 75:       add(False, False, f"RSI {r:.0f} — اشباع خرید", -15)
+    elif r >= 65:     add(False, True,  f"RSI {r:.0f} — نزدیک اشباع خرید", 5)
+    elif r >= 45:     add(True,  False, f"RSI {r:.0f} — مومنتوم سالم", 15)
+    elif r >= 30:     add(True,  False, f"RSI {r:.0f} — ناحیهٔ فرصت", 12)
+    else:             add(False, True,  f"RSI {r:.0f} — اشباع فروش (ریسک/فرصت)", 8)
+    # ۵) فاصله تا مقاومت
+    if dist_res >= 0.10: add(True,  False, f"تا مقاومت ۶۰روزه {dist_res*100:.0f}% فاصله — جای رشد", 10)
+    elif dist_res >= 0.03: add(True, False, f"تا مقاومت {dist_res*100:.0f}%", 5)
+    else:                add(False, False, f"چسبیده به مقاومت ۶۰روزه ({dist_res*100:.1f}%)", -8)
+    # ۶) نزدیکی حمایت
+    if dist_sup <= 0.05: add(True, False, f"نزدیک حمایت ۶۰روزه ({dist_sup*100:.1f}%)", 8)
+    # ۷) مومنتوم ۵ روزه
+    if m5 > 0:        add(True,  False, f"مومنتوم ۵ روزه مثبت ({m5*100:+.1f}%)", 10)
+    elif m5 > -0.02:  add(False, True,  f"مومنتوم ۵ روزه خنثی ({m5*100:+.1f}%)", 0)
+    else:             add(False, False, f"مومنتوم ۵ روزه منفی ({m5*100:+.1f}%)", -8)
+
+    ttl = f"{sym} ({company})" if company else sym
+    if total >= 75:   verdict, emoji = "🟢 خرید — سیگنال‌های تکنیکال به‌شدت مثبت", "🟢"
+    elif total >= 60: verdict, emoji = "🟢 خرید (تدریجی) — مجموع سیگنال‌ها مثبت", "🟢"
+    elif total >= 35: verdict, emoji = "🟡 نگهداری — سیگنال‌ها ترکیبی", "🟡"
+    else:             verdict, emoji = "🔴 فروش/احتیاط — مجموع سیگنال‌ها منفی", "🔴"
+
+    L = [f"⚖️ ارزیابی «{ttl}»", "",
+         f"{emoji} حکم: {verdict}", f"امتیاز کل: {total:+.0f} از ~۸۸", "",
+         f"• آخرین قیمت: {fmt(last)}",
+         f"• حمایت/مقاومت ۶۰روزه: {fmt(sup)} / {fmt(res)}", "",
+         "🔍 دلایل:"]
+    L += [f"  {s}" for s in signals]
+    L += ["", "⚠️ این حکم، تفسیر ماشینیِ قواعد کلاسیک تکنیکال روی دادهٔ ۶۰ روز اخیر است؛",
+          "نه پیش‌بینی آینده و نه توصیه خرید/فروش. تصمیم نهایی و ریسک با شماست.",
+          "منبع داده: دیتابورس"]
+    return "\n".join(L)
+
 # ───────── دستورها ─────────
-CMD_MAP = {"a": "news", "b": "screen", "c": "chart", "d": "levels"}
+CMD_MAP = {"a": "news", "b": "screen", "c": "chart", "d": "levels", "e": "verdict"}
 USAGE = ("🤖 دستورها:\n"
          "/a — سرخطی و اخبار\n"
          "/b — غربالگری نمادهای منتخب\n"
          "/c نماد — سیگنال نموداری (مثال: /c فولاد)\n"
-         "/d نماد — سطوح ورود و خروج (مثال: /d فملی)")
+         "/d نماد — سطوح ورود و خروج (مثال: /d فملی)\n"
+         "/e نماد — حکم خرید/نگهداری/فروش (مثال: /e وبملت)")
 
 def parse_cmd(text):
     t = text.strip()
     if t == "/اخبار": return "news", ""
     if t == "/غربال": return "screen", ""
     if t in ("/help", "/start"): return "help", ""
-    m = re.match(r"^/([a-dA-D])(?:\s+(.+))?$", t)
+    m = re.match(r"^/([a-eA-E])(?:\s+(.+))?$", t)
     if m:
         arg = (m.group(2) or "").strip().strip("«»'\"،, ")
         return CMD_MAP.get(m.group(1).lower()), arg
@@ -520,7 +589,8 @@ def handle_update(u):
     ack_text = {"news": "🔎 در حال دریافت اخبار و جمع‌آوری داده‌های بورسی...",
                 "screen": "📈 درحال تحلیل بازار بورسی...",
                 "chart": f"📊 در حال ساخت سیگنال «{arg}»...",
-                "levels": f"🧭 در حال محاسبهٔ سطوح «{arg}»..."}.get(cmd, "⏳ در حال پردازش...")
+                "levels": f"🧭 در حال محاسبهٔ سطوح «{arg}»...",
+                "verdict": f"⚖️ در حال ارزیابی وضعیت «{arg}»..."}.get(cmd, "⏳ در حال پردازش...")
     ack_id = send_ack(chat, ack_text)
     try:
         if cmd == "news":
@@ -528,7 +598,7 @@ def handle_update(u):
         elif cmd == "screen":
             ranked, d = collect()
             result = build_screen(ranked, d)
-        elif cmd in ("chart", "levels"):
+        elif cmd in ("chart", "levels", "verdict"):
             if not arg:
                 send_to(chat, "❓ اسم نماد را جلوی دستور بنویسید. مثال: /c فولاد", msg_id=ack_id)
                 return True
@@ -541,7 +611,10 @@ def handle_update(u):
                         msg_id=ack_id)
                 if not ok: send_to(chat, caption)
                 return True
-            result = build_levels(arg)
+            elif cmd == "levels":
+                result = build_levels(arg)
+            else:
+                result = build_verdict(arg)
         else:
             return False
         if ack_id: send_to(chat, result, msg_id=ack_id)
@@ -573,7 +646,7 @@ def poll_and_respond():
     if not updates:
         print("دستور جدیدی نیست"); return
     last = max(u.get("update_id", 0) for u in updates)
-    get_updates(offset=last + 1)              # تأیید فوری → بدون پاسخ تکراری
+    get_updates(offset=last + 1)
     done = 0
     for u in updates:
         if done >= 6: break
@@ -588,7 +661,7 @@ def listen():
             updates = get_updates(offset=offset, timeout=50)
             if updates:
                 last = max(u.get("update_id", 0) for u in updates)
-                get_updates(offset=last + 1, timeout=0)   # تأیید فوری
+                get_updates(offset=last + 1, timeout=0)
                 offset = last + 1
                 for u in updates:
                     try: handle_update(u)
