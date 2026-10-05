@@ -1,0 +1,100 @@
+name: test13-xhr-hunt
+on: {workflow_dispatch: {}}
+jobs:
+  hunt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: xhr-hunt
+        shell: bash
+        run: |
+          set +e
+          UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"
+          B="https://databourse.ir"
+          ENC=$(python3 -c "import urllib.parse;print(urllib.parse.quote('فولاد'))")
+          SYM="$B/symbol/$ENC"
+          g(){ curl -sL -A "$UA" --max-time 25 "$@" ; }
+
+          echo "=== ۱) صفحهٔ نماد: همهٔ JSها + اسکریپت‌های درون‌خطی ==="
+          g "$SYM" -o /tmp/sy.html
+          echo "حجم: $(wc -c < /tmp/sy.html)"
+          echo "-- فایل‌های JS صفحهٔ نماد:"
+          for js in $(grep -oE '(src|href)="[^"]+\.js[^"]*"' /tmp/sy.html | sed -E 's/^[^"]*="//; s/"$//' | sort -u); do
+            case "$js" in http*) u="$js";; /*) u="$B$js";; *) u="$B/$js";; esac
+            g "$u" -o /tmp/j.js
+            sz=$(wc -c < /tmp/j.js 2>/dev/null); [ "${sz:-0}" -lt 500 ] && continue
+            echo "  JS($((sz/1024))KB): ${u:0:90}"
+            grep -oE '(fetch\(|axios|XMLHttpRequest|\$\.ajax|\.get\(|\.post\(|url:|url=)[^;]{0,100}' /tmp/j.js | head -10 | sed 's/^/    /'
+            grep -oE '"[^"]*(api|data|price|history|symbol|candle|json)[^"]*"' /tmp/j.js | sort -u | head -10 | sed 's/^/    STR: /'
+          done
+          echo "-- اسکریپت درون‌خطی صفحهٔ نماد (جستجوی fetch/آدرس/کد نماد):"
+          python3 - <<'PY'
+          import re
+          h = open('/tmp/sy.html', encoding='utf-8', errors='ignore').read()
+          scripts = re.findall(r'<script(?![^>]*src)[^>]*>(.*?)</script>', h, re.S)
+          for i, s in enumerate(scripts):
+              s = s.strip()
+              if len(s) < 30: continue
+              print(f"  [inline {i}] {len(s)}B:")
+              for pat in (r'(fetch|axios|XMLHttpRequest|\.ajax|\.get|\.post)\([^)]{0,120}',
+                          r'https?://[^\s"\']{5,90}',
+                          r'/(symbol|api|data|price|history|json)[^\s"\']{0,60}',
+                          r'insCode[^,;\n]{0,40}'):
+                  for m in re.findall(pat, s)[:6]:
+                      print("    ", str(m)[:120])
+              if len(s) > 400 and 'menu' not in s and 'sidebar' not in s:
+                  print("    --- نمونه ۳۰۰ کاراکتر:", s[:300].replace('\n',' '))
+          PY
+
+          echo ""
+          echo "=== ۲) ترفند AJAX: درخواست صفحه با هدر XMLHttpRequest ==="
+          for p in "symbol/$ENC" "marketwatch" "filter/smart-money-inflow"; do
+            g -H "X-Requested-With: XMLHttpRequest" -H "Accept: application/json" "$B/$p" -o /tmp/aj.txt
+            echo "  /$p => $(wc -c < /tmp/aj.txt)B | شروع: $(head -c 100 /tmp/aj.txt | tr '\n' ' ')"
+          done
+
+          echo ""
+          echo "=== ۳) پروب الگوهای XHR تاریخچه ==="
+          for p in "symbol/$ENC/data" "symbol/data?$ENC" "data/$ENC" "history/$ENC" \
+                   "prices/$ENC" "ajax/symbol?$ENC" "getdata?symbol=$ENC" \
+                   "api/symbol/$ENC" "symbol/$ENC/json" "json/$ENC" ; do
+            c=$(curl -sL -A "$UA" -H "X-Requested-With: XMLHttpRequest" --max-time 12 -o /tmp/x.txt -w "%{http_code}" "$B/$p" 2>/dev/null)
+            [ -z "$c" ] && c=000
+            sz=$(wc -c < /tmp/x.txt 2>/dev/null || echo 0)
+            nf=$(grep -ci 'not found\|یافت نشد' /tmp/x.txt 2>/dev/null || echo 0)
+            [ "$nf" = "0" ] && [ "$sz" -gt 100 ] && STAR="⭐" || STAR=""
+            echo "  $STAR /$p => $c | ${sz}B | $(head -c 90 /tmp/x.txt 2>/dev/null | tr '\n' ' ')"
+          done
+
+          echo ""
+          echo "=== ۴) جدول فیلتر ورود پول هوشمند (دادهٔ SSR زنده!) ==="
+          g "$B/filter/smart-money-inflow" -o /tmp/f.html
+          python3 - <<'PY'
+          import re
+          h = open('/tmp/f.html', encoding='utf-8', errors='ignore').read()
+          rows = re.findall(r'<tr[^>]*>(.*?)</tr>', h, re.S)
+          print(f"  ردیف‌ها: {len(rows)}")
+          for r in rows[:6]:
+              cells = [re.sub(r'<[^>]+>', '', c).strip()[:20] for c in re.findall(r'<t[dh][^>]*>(.*?)</t[dh]>', r, re.S)]
+              if any(cells): print("   |", " | ".join(cells[:9]))
+          PY
+
+          echo ""
+          echo "=== ۵) marketwatch: جدول کامل بازار؟ ==="
+          g "$B/marketwatch" -o /tmp/mw.html
+          python3 - <<'PY'
+          import re
+          h = open('/tmp/mw.html', encoding='utf-8', errors='ignore').read()
+          print(f"  حجم: {len(h)} | فولاد: {h.count('فولاد')} | خساپا: {h.count('خساپا')} | جدول: {h.count('<table')}")
+          rows = re.findall(r'<tr[^>]*>(.*?)</tr>', h, re.S)
+          print(f"  ردیف‌ها: {len(rows)}")
+          for r in rows[:4]:
+              cells = [re.sub(r'<[^>]+>', '', c).strip()[:18] for c in re.findall(r'<t[dh][^>]*>(.*?)</t[dh]>', r, re.S)]
+              if any(cells): print("   |", " | ".join(cells[:9]))
+          # آیا لینک نمادها کد عددی هم دارند؟
+          codes = re.findall(r'href="[^"]*symbol[^"]*"[^>]*>([^<]+)<', h)[:5]
+          print("  نمونهٔ لینک‌ها:", codes)
+          PY
+
+          echo ""
+          echo "=== END ==="
