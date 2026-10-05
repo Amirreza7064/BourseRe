@@ -1,0 +1,93 @@
+name: test10-proxy-hunt
+on: {workflow_dispatch: {}}
+jobs:
+  hunt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: hunt
+        shell: bash
+        run: |
+          set +e
+          UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"
+          g(){ curl -sL -A "$UA" --max-time 20 "$1" -o "$2" 2>/dev/null; }
+
+          echo "=== ۰) پروب هاست‌ها ==="
+          for u in \
+            "https://tahlilbazaar.com/" \
+            "https://tahlilbazaar.com/wp-json/" \
+            "https://www.irbourse.com/wp-json/" \
+            "https://sahmplus.com/" \
+            "https://online.agah.com/" \
+            "https://ms.mobinsb.com/" \
+            "https://portal.etminansahm.com/" \
+            "https://online.shahr-boorse.com/" \
+            "https://databourse.ir/" \
+            "https://sahmyab.com/" ; do
+            rm -f /tmp/p.html
+            c=$(curl -sL -o /tmp/p.html -A "$UA" --max-time 12 -w "%{http_code}" "$u" 2>/dev/null)
+            [ -z "$c" ] && c=000
+            f=$(grep -o 'فولاد' /tmp/p.html 2>/dev/null | wc -l)
+            echo "  $u => $c | $(wc -c < /tmp/p.html 2>/dev/null || echo 0)B | فولاد:$f"
+          done
+
+          echo ""
+          echo "=== ۱) تحلیل‌بازار: لینک‌های نماد + تست SSR تاریخچه ==="
+          g "https://tahlilbazaar.com/" /tmp/tb.html
+          echo "  لینک‌های حاوی فولاد:"
+          grep -oE 'href="[^"]*[^"]*"' /tmp/tb.html | grep 'فولاد' | sort -u | head -5 | sed 's/^/    /'
+          LN=$(grep -oE 'href="[^"]*فولاد[^"]*"' /tmp/tb.html | head -1 | sed 's/^href="//; s/"$//')
+          if [ -n "$LN" ]; then
+            case "$LN" in http*) P="$LN";; /*) P="https://tahlilbazaar.com$LN";; *) P="https://tahlilbazaar.com/$LN";; esac
+            echo "  صفحهٔ نماد: $P"
+            g "$P" /tmp/tp.html
+            echo "    حجم: $(wc -c < /tmp/tp.html) | 'فولاد': $(grep -o 'فولاد' /tmp/tp.html | wc -l)"
+            echo "    قیمت‌های شاخص (۱۰ رقم در جدول): $(grep -oE '>[0-9]{9,12}<' /tmp/tp.html | wc -l)"
+            echo "    کلیدهای داده: date=$(grep -o 'data-date' /tmp/tp.html | wc -l) | جدول: $(grep -o '<table' /tmp/tp.html | wc -l)"
+            grep -oE 'href="[^"]*(تاریخ|history|سابقه|price)[^"]*"' /tmp/tp.html | sort -u | head -5 | sed 's/^/    سابقه?: /'
+          fi
+
+          echo ""
+          echo "=== ۲) آگاه آنلاین: معدن‌کاوی کامل JS ==="
+          g "https://online.agah.com/" /tmp/ag.html
+          for js in $(grep -oE '(src|href)="[^"]+\.js[^"]*"' /tmp/ag.html | sed -E 's/^[^"]*="//; s/"$//' | sort -u | head -8); do
+            case "$js" in http*) u="$js";; /*) u="https://online.agah.com$js";; *) u="https://online.agah.com/$js";; esac
+            g "$u" /tmp/a.js
+            sz=$(wc -c < /tmp/a.js 2>/dev/null); [ "${sz:-0}" -lt 2000 ] && continue
+            echo "  JS($((sz/1024))KB): ${u:0:80}"
+            grep -oE '"https?://[a-zA-Z0-9._/-]{5,80}"' /tmp/a.js | grep -iE 'api|gateway|service|quote|market' | sort -u | head -8 | sed 's/^/    URL: /'
+            grep -oE '"/(api|gateway|svc|ws)/[a-zA-Z0-9_/.-]{2,60}"' /tmp/a.js | sort -u | head -12 | sed 's/^/    PATH: /'
+          done
+
+          echo ""
+          echo "=== ۳) سهم‌پلاس: Next.js buildId + چانک‌ها ==="
+          g "https://sahmplus.com/" /tmp/sp.html
+          bid=$(grep -oE '"buildId":"[^"]+"' /tmp/sp.html | head -1 | cut -d'"' -f4)
+          echo "  buildId: ${bid:-نیست}"
+          if [ -n "$bid" ]; then
+            g "https://sahmplus.com/_next/static/$bid/_buildManifest.js" /tmp/bm.js
+            grep -oE 'static/chunks/[^"]+\.js' /tmp/bm.js 2>/dev/null | sort -u | head -10 > /tmp/ch.txt
+            echo "  چانک‌ها: $(wc -l < /tmp/ch.txt)"
+            while read -r c; do
+              g "https://sahmplus.com/_next/$c" /tmp/c.js
+              sz=$(wc -c < /tmp/c.js 2>/dev/null); [ "${sz:-0}" -lt 3000 ] && continue
+              h=$(grep -oE '"(https?://[^"]*api[^"]*|/api/[a-zA-Z0-9_/.-]{2,60})"' /tmp/c.js 2>/dev/null | sort -u | head -8)
+              [ -n "$h" ] && { echo "  چانک ${c##*/} ($((sz/1024))KB):"; echo "$h" | sed 's/^/    /'; }
+            done < /tmp/ch.txt
+          fi
+
+          echo ""
+          echo "=== ۴) موبین‌صادرت: معدن‌کاوی ==="
+          g "https://ms.mobinsb.com/" /tmp/mb.html
+          echo "  حجم صفحه: $(wc -c < /tmp/mb.html 2>/dev/null)"
+          for js in $(grep -oE '(src|href)="[^"]+\.js[^"]*"' /tmp/mb.html | sed -E 's/^[^"]*="//; s/"$//' | sort -u | head -6); do
+            case "$js" in http*) u="$js";; /*) u="https://ms.mobinsb.com$js";; *) u="https://ms.mobinsb.com/$js";; esac
+            g "$u" /tmp/m.js
+            sz=$(wc -c < /tmp/m.js 2>/dev/null); [ "${sz:-0}" -lt 2000 ] && continue
+            echo "  JS($((sz/1024))KB): ${u:0:80}"
+            grep -oE '"https?://[a-zA-Z0-9._/-]{5,80}"' /tmp/m.js | grep -iE 'api|gateway|tsetmc|market|quote' | sort -u | head -8 | sed 's/^/    URL: /'
+            grep -oE '"/(api|gateway|svc)/[a-zA-Z0-9_/.-]{2,60}"' /tmp/m.js | sort -u | head -10 | sed 's/^/    PATH: /'
+          done
+
+          echo ""
+          echo "=== END — تا انتها اجرا شد ==="
