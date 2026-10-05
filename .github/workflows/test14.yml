@@ -1,0 +1,47 @@
+name: test14-cmds
+on: {workflow_dispatch: {}}
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: probe-setmycommands
+        shell: bash
+        run: |
+          set +e
+          BASE="https://tapi.bale.ai/bot$BALE_TOKEN"
+          try(){
+            echo "----- $1"
+            curl -s -X POST "$BASE/setMyCommands" \
+              -H "Content-Type: application/json" \
+              --max-time 20 -d "$2"
+            echo; echo
+          }
+
+          try "1-single-ascii-desc" \
+            '{"commands":[{"command":"a","description":"test"}]}'
+
+          try "2-single-slash-ascii" \
+            '{"commands":[{"command":"/a","description":"test"}]}'
+
+          try "3-two-cmds-ascii" \
+            '{"commands":[{"command":"a","description":"news"},{"command":"b","description":"screen"}]}'
+
+          try "4-long-command-name" \
+            '{"commands":[{"command":"news","description":"test"}]}'
+
+          try "5-fa-description" \
+            '{"commands":[{"command":"a","description":"سرخطی بورس"}]}'
+
+          try "6-with-language-code" \
+            '{"commands":[{"command":"a","description":"test"}],"language_code":"fa"}'
+
+          try "7-fa-desc-no-emoji-full" \
+            '{"commands":[{"command":"a","description":"سرخطی و اخبار بورس"},{"command":"b","description":"غربالگری نمادهای منتخب"}]}'
+
+          echo "----- getMyCommands (وضعیت فعلی)"
+          curl -s "$BASE/getMyCommands" --max-time 20
+          echo
+          echo "=== END ==="
+        env:
+          BALE_TOKEN: ${{ secrets.BALE_TOKEN }}
