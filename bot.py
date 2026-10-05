@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """فایل: bot.py — سرخطی + غربالگری واقعی دیتابورس + /c نماد (چارت) + /d نماد (سطوح)
-منبع داده: databourse.ir (باز از Actions) + tgju + بورس‌پرس
+منابع: databourse.ir (بازار/پول‌هوشمند/تاریخچه) + tgju + بورس‌پرس
 حالت‌ها: morning | afternoon | both | poll | listen"""
 
 import os, re, io, sys, html, math, time
@@ -27,7 +27,7 @@ TOP_N      = 25
 NEWS_LIMIT = 10
 MAXLEN     = 3900
 MIN_VALUE  = 2_000        # حداقل ارزش معاملات (میلیون ریال) ≈ ۲۰۰ میلیون تومان
-SEND_RESULT_AS_NEW = True # بعد از ویرایش پیام انتظار، پیام نوتیف هم بیاید؟
+SEND_RESULT_AS_NEW = True
 
 RUN_MODE = os.environ.get("RUN_MODE", "both").strip().lower()   # morning|afternoon|both|poll|listen
 
@@ -189,11 +189,9 @@ def build_headline():
 
 # ───────── دیتابورس: پارس جدول‌های SSR ─────────
 def split_row(cells):
-    """ردیف جدول دیتابورس → (نماد، اعداد ساده به‌ترتیب، درصدهای پرانتزی به‌ترتیب)
-    ساختار marketwatch:   [نماد، آخرین، (درصد)، پایانی، (درصد)، تعداد، حجم، ارزش]
-    ساختار smart-money:   [نماد، قدرت، آخرین، (درصد)، پایانی، (درصد)، تعداد، حجم، ارزش]
-    چون سلول قیمت دو زیرسلول دارد، هدرها به‌درستی با dict جفت نمی‌شوند؛
-    پس جداکردن «اعداد ساده» از «پرانتزی‌ها» قابل‌اعتمادترین راه است."""
+    """ردیف جدول → (نماد، اعداد ساده به‌ترتیب، درصدهای پرانتزی به‌ترتیب)
+    marketwatch:  [نماد، آخرین، (درصد)، پایانی، (درصد)، تعداد، حجم، ارزش]
+    smart-money:  [نماد، قدرت، آخرین، (درصد)، پایانی، (درصد)، تعداد، حجم، ارزش]"""
     if not cells: return None, [], []
     sym = normalize(cells[0].strip())
     if not (3 <= len(sym) <= 15) or not re.search(r'[\u0600-\u06FF]', sym):
@@ -209,6 +207,14 @@ def split_row(cells):
             if v is not None: plain.append(v)
     return sym, plain, paren
 
+def rows_of_first_table(html_text):
+    tables = re.findall(r'<table[^>]*>(.*?)</table>', html_text, re.S)
+    if not tables: return []
+    return re.findall(r'<tr[^>]*>(.*?)</tr>', tables[0], re.S)
+
+def cells_of(row_html):
+    return [clean(c) for c in re.findall(r'<t[dh][^>]*>(.*?)</t[dh]>', row_html, re.S)]
+
 def fetch_databourse_market():
     """کل بازار از /marketwatch → لیست دیکشنری نمادها"""
     out = []
@@ -216,12 +222,8 @@ def fetch_databourse_market():
         r = requests.get(f"{DB}/marketwatch", headers=UA, timeout=45)
         if r.status_code != 200:
             print("dbmw status:", r.status_code); return out
-        tables = re.findall(r'<table[^>]*>(.*?)</table>', r.text, re.S)
-        if not tables:
-            print("dbmw: no table"); return out
-        rows_raw = re.findall(r'<tr[^>]*>(.*?)</tr>', tables[0], re.S)
-        for rr in rows_raw:
-            cells = [clean(c) for c in re.findall(r'<t[dh][^>]*>(.*?)</t[dh]>', rr, re.S)]
+        for rr in rows_of_first_table(r.text):
+            cells = cells_of(rr)
             sym, plain, paren = split_row(cells)
             if not sym or len(plain) < 5:
                 continue
@@ -234,30 +236,35 @@ def fetch_databourse_market():
     return out
 
 def fetch_smart_money():
-    """قدرت خریداران از فیلتر ورود پول هوشمند → دیکشنری نماد:عدد"""
+    """قدرت خریداران — صفحهٔ ۱ (SSR) + تلاش برای صفحات بعدی → دیکشنری نماد:عدد"""
     out = {}
     try:
-        r = requests.get(f"{DB}/filter/smart-money-inflow", headers=UA, timeout=45)
-        if r.status_code != 200:
-            print("dbsm status:", r.status_code); return out
-        tables = re.findall(r'<table[^>]*>(.*?)</table>', r.text, re.S)
-        if not tables: return out
-        rows_raw = re.findall(r'<tr[^>]*>(.*?)</tr>', tables[0], re.S)
-        for rr in rows_raw:
-            cells = [clean(c) for c in re.findall(r'<t[dh][^>]*>(.*?)</t[dh]>', rr, re.S)]
-            sym, plain, paren = split_row(cells)
-            if not sym or len(plain) < 6: continue
-            power = plain[0]
-            if power is not None and power > 0:
-                out[sym] = power
-        print(f"smart-money: {len(out)} نماد")
+        urls = [f"{DB}/filter/smart-money-inflow",
+                f"{DB}/filter/smart-money-inflow?page=2",
+                f"{DB}/filter/smart-money-inflow?page=3"]
+        for url in urls:
+            try:
+                r = requests.get(url, headers=UA, timeout=40)
+                if r.status_code != 200 or len(r.content) < 3000:
+                    continue
+                added = 0
+                for rr in rows_of_first_table(r.text):
+                    sym, plain, paren = split_row(cells_of(rr))
+                    if not sym or len(plain) < 6: continue
+                    power = plain[0]
+                    if power is not None and power > 0 and sym not in out:
+                        out[sym] = power; added += 1
+                print(f"dbsm ...{url[-10:]}: +{added}")
+            except Exception as e:
+                print("dbsm page err:", str(e)[:80])
+        print(f"smart-money total: {len(out)} نماد")
     except Exception as e:
         print("dbsm err:", str(e)[:90])
     return out
 
-# ───────── غربالگری واقعی ─────────
+# ───────── غربالگری واقعی (تیون‌شده) ─────────
 def collect():
-    """خروجی: (رتبه‌بندی [(نماد، امتیاز)]، تاریخ) بر اساس دادهٔ واقعی دیتابورس"""
+    """خروجی: (رتبه‌بندی [(نماد، امتیاز)]، تاریخ)"""
     rows = fetch_databourse_market()
     if not rows:
         return None, None
@@ -275,15 +282,22 @@ def collect():
     if not pool:
         return [], today
 
+    vmax = max((p["val"] for p in pool), default=1) or 1
+    dmax = max((p["chg"] for p in pool if p["chg"] is not None), default=0)
+
     def score(p):
         s = 0.0
-        s += min(25.0, math.log10(max(p["val"], 1)) / 3.5)          # نقدشوندگی (تا ۲۵)
-        if p["chg"] is not None and p["chg"] > 0:                   # رشد قیمت (تا ۲۵)
-            s += min(25.0, p["chg"] * 8)
-        if p["sm"] is not None and p["sm"] >= 1.2:                  # قدرت خریداران (تا ۴۰)
-            s += min(40.0, p["sm"] * 22)
-        else:
-            s -= 5
+        # ۱) نقدشوندگی نرمال‌شده نسبت به بزرگ‌ترین ارزش روز (تا ۳۰)
+        s += 30.0 * (math.log10(p["val"] + 10) / math.log10(vmax + 10))
+        # ۲) رشد قیمت (تا ۳۰) — مثبت سالم امتیاز کامل‌تر می‌گیرد
+        if p["chg"] is not None:
+            if p["chg"] > 0:
+                s += min(30.0, 15.0 + p["chg"] * 4)
+            elif p["chg"] > -1.0:
+                s += 7.0
+        # ۳) قدرت خریداران (تا ۴۰) — نبود داده = خنثی
+        if p["sm"] is not None and p["sm"] >= 1.2:
+            s += min(40.0, 15.0 + (p["sm"] - 1.2) * 60)
         return s
 
     pool.sort(key=score, reverse=True)
@@ -302,9 +316,8 @@ def build_screen(ranked, d):
           "🤖 خروجی خودکار است؛ توصیه خرید/فروش نیست."]
     return "\n".join(L)
 
-# ───────── دیتابورس: تاریخچهٔ نماد (برای /c و /d) ─────────
+# ───────── دیتابورس: تاریخچهٔ نماد (/c و /d) ─────────
 def extract_js_arrays(html_text):
-    """همهٔ آرایه‌های let/var/const X = [...] با براکت‌شمار → JSON"""
     arrays = {}
     for m in re.finditer(r'\b(?:let|var|const)\s+(\w+)\s*=\s*\[', html_text):
         name = m.group(1)
