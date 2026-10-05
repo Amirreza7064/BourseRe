@@ -1,0 +1,68 @@
+name: test11-databourse
+on: {workflow_dispatch: {}}
+jobs:
+  hunt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: databourse-deep
+        shell: bash
+        run: |
+          set +e
+          UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"
+          B="https://databourse.ir"
+          g(){ curl -sL -A "$UA" --max-time 20 "$1" -o "$2" 2>/dev/null; }
+          ENC=$(python3 -c "import urllib.parse;print(urllib.parse.quote('فولاد'))")
+
+          echo "=== ۱) ساختار لینک‌های صفحهٔ اصلی ==="
+          g "$B/" /tmp/db.html
+          echo "حجم: $(wc -c < /tmp/db.html)"
+          echo "-- href ها (۴۰ نمونه):"
+          grep -oE 'href="[^"]+"' /tmp/db.html | sed 's/href="//; s/"$//' | grep -vE '^(#|javascript|mailto|tel)' | sort -u | head -40 | sed 's/^/  /'
+          echo "-- بافت اطراف «فولاد» (۳ مورد):"
+          grep -o '.\{120\}فولاد.\{120\}' /tmp/db.html | head -3 | sed 's/^/  /'
+
+          echo ""
+          echo "=== ۲) sitemap و robots (سریع‌ترین راه کشف الگوی URL) ==="
+          for p in robots.txt sitemap.xml; do
+            g "$B/$p" /tmp/s.txt
+            echo "-- /$p ($(wc -c < /tmp/s.txt)B):"
+            head -c 1200 /tmp/s.txt | tr -d '\r' | head -25 | sed 's/^/  /'
+          done
+
+          echo ""
+          echo "=== ۳) پروب الگوهای صفحهٔ نماد ==="
+          for pat in "symbol/$ENC" "stock/$ENC" "s/$ENC" "symbol?name=$ENC" "?symbol=$ENC" "tse/$ENC" "company/$ENC"; do
+            rm -f /tmp/q.html
+            c=$(curl -sL -o /tmp/q.html -A "$UA" --max-time 12 -w "%{http_code}" "$B/$pat" 2>/dev/null)
+            [ -z "$c" ] && c=000
+            f=$(grep -o 'فولاد' /tmp/q.html 2>/dev/null | wc -l)
+            n=$(grep -oE '>[0-9]{6,12}<' /tmp/q.html 2>/dev/null | wc -l)
+            echo "  /$pat => $c | $(wc -c < /tmp/q.html 2>/dev/null || echo 0)B | فولاد:$f | اعداد:$n"
+          done
+
+          echo ""
+          echo "=== ۴) معدن‌کاوی JS ==="
+          for js in $(grep -oE '(src|href)="[^"]+\.js[^"]*"' /tmp/db.html | sed -E 's/^[^"]*="//; s/"$//' | sort -u | head -8); do
+            case "$js" in http*) u="$js";; /*) u="$B$js";; *) u="$B/$js";; esac
+            g "$u" /tmp/j.js
+            sz=$(wc -c < /tmp/j.js 2>/dev/null); [ "${sz:-0}" -lt 1500 ] && continue
+            echo "  JS($((sz/1024))KB): ${u:0:90}"
+            grep -oE '"(https?://[^"]{5,80}|/[a-zA-Z0-9_/.-]{3,60})"' /tmp/j.js | grep -iE 'api|symbol|stock|price|history|candle|market' | sort -u | head -12 | sed 's/^/    /'
+          done
+
+          echo ""
+          echo "=== ۵) پروب API های احتمالی ==="
+          for p in "api/symbol?name=$ENC" "api/price?symbol=$ENC" "api/symbols" "api/market" "api/v1/symbols"; do
+            c=$(curl -sL -A "$UA" --max-time 12 -o /tmp/a.txt -w "%{http_code}" "$B/$p" 2>/dev/null)
+            [ -z "$c" ] && c=000
+            echo "  /$p => $c | $(head -c 120 /tmp/a.txt 2>/dev/null | tr '\n' ' ')"
+          done
+
+          echo ""
+          echo "=== ۶) تحلیل‌بازار: بافت فولاد (شاید لینک نادیده گرفته شده) ==="
+          g "https://tahlilbazaar.com/" /tmp/tb.html
+          grep -o '.\{100\}فولاد.\{100\}' /tmp/tb.html | head -3 | sed 's/^/  /'
+
+          echo ""
+          echo "=== END ==="
