@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""فایل: bot.py — سرخطی + غربالگری دیتابورس + /c چارت + /d سطوح + /e حکم
-+ دکمه‌های دستور (setMyCommands — قالب صحیح: بدون اسلش، حروف کوچک)
-+ حالت انتظار نماد (دستور بدون نماد → کاربر فقط نام نماد می‌فرستد)
+"""فایل: bot.py — سرخطی + غربالگری دیتابورس + چارت/سطوح/حکم
+دکمه‌های دستور: نام بلند (news/screen/chart/levels/verdict) — چون بله تک‌حرف نمی‌پذیرد
++ دستورهای کوتاه /a تا /e همچنان فعال + حالت انتظار نماد
 حالت‌ها: morning | afternoon | both | poll | listen"""
 
 import os, re, io, sys, html, math, time
@@ -30,7 +30,7 @@ NEWS_LIMIT = 10
 MAXLEN     = 3900
 MIN_VALUE  = 2_000
 SEND_RESULT_AS_NEW = True
-PENDING_TTL = 600            # ثانیه اعتبار حالت انتظار نماد
+PENDING_TTL = 600
 
 RUN_MODE = os.environ.get("RUN_MODE", "both").strip().lower()
 
@@ -82,14 +82,14 @@ def send_ack(chat_id, text):
     return None
 
 def register_commands():
-    """ثبت دکمه‌های دستور در منوی بله — قالب صحیح: بدون اسلش، حروف کوچک"""
+    """دکمه‌های دستور — نام بلند (تأییدشده در تست ۱۴: بله تک‌حرف نمی‌پذیرد)"""
     payload = {"commands": [
-        {"command": "a",    "description": "🌅 سرخطی و اخبار بورس"},
-        {"command": "b",    "description": "🎯 غربالگری نمادهای منتخب"},
-        {"command": "c",    "description": "📊 سیگنال نموداری — بعد از انتخاب، نام نماد بفرستید"},
-        {"command": "d",    "description": "🧭 سطوح ورود و خروج — بعد از انتخاب، نام نماد بفرستید"},
-        {"command": "e",    "description": "⚖️ حکم خرید/نگهداری/فروش — نام نماد بفرستید"},
-        {"command": "help", "description": "❓ راهنما"},
+        {"command": "news",    "description": "🌅 سرخطی و اخبار بورس"},
+        {"command": "screen",  "description": "🎯 غربالگری نمادهای منتخب"},
+        {"command": "chart",   "description": "📊 سیگنال نموداری — بعد از انتخاب، نام نماد بفرستید"},
+        {"command": "levels",  "description": "🧭 سطوح ورود و خروج — بعد از انتخاب، نام نماد بفرستید"},
+        {"command": "verdict", "description": "⚖️ حکم خرید/نگهداری/فروش — نام نماد بفرستید"},
+        {"command": "help",    "description": "❓ راهنما"},
     ]}
     try:
         r = requests.post(CMDS_URL, json=payload, timeout=20)
@@ -639,8 +639,18 @@ def build_verdict(sym):
     return "\n".join(L)
 
 # ───────── دستورها و حالت انتظار ─────────
-CMD_MAP  = {"a": "news", "b": "screen", "c": "chart", "d": "levels", "e": "verdict"}
-CMD_LETTER = {"chart": "c", "levels": "d", "verdict": "e"}
+# نام بلند (دکمه‌ها) + نام کوتاه (سازگاری) هر دو پذیرفته می‌شوند
+CMD_MAP = {
+    "a": "news", "b": "screen", "c": "chart", "d": "levels", "e": "verdict",
+    "news": "news", "screen": "screen", "chart": "chart", "levels": "levels", "verdict": "verdict",
+}
+CMD_ALIAS = {
+    "news": ("a", "سرخطی و اخبار بورس"),
+    "screen": ("b", "غربالگری نمادهای منتخب"),
+    "chart": ("c", "سیگنال نموداری — بعد از انتخاب، نام نماد بفرستید"),
+    "levels": ("d", "سطوح ورود و خروج — بعد از انتخاب، نام نماد بفرستید"),
+    "verdict": ("e", "حکم خرید/نگهداری/فروش — نام نماد بفرستید"),
+}
 NEEDS_SYM = ("chart", "levels", "verdict")
 ACK_TEXT = {
     "news":   "🔎 در حال دریافت اخبار و جمع‌آوری داده‌های بورسی...",
@@ -650,13 +660,13 @@ ACK_TEXT = {
     "verdict": "⚖️ در حال ارزیابی وضعیت «{arg}»...",
 }
 USAGE = ("🤖 دستورها:\n"
-         "/a — سرخطی و اخبار\n"
-         "/b — غربالگری نمادهای منتخب\n"
-         "/c نماد — سیگنال نموداری (مثال: /c فولاد)\n"
-         "/d نماد — سطوح ورود و خروج (مثال: /d فملی)\n"
-         "/e نماد — حکم خرید/نگهداری/فروش (مثال: /e وبملت)")
+         "/news یا /a — سرخطی و اخبار\n"
+         "/screen یا /b — غربالگری نمادهای منتخب\n"
+         "/chart نماد — سیگنال نموداری (مثال: /chart فولاد)\n"
+         "/levels نماد — سطوح ورود و خروج (مثال: /levels فملی)\n"
+         "/verdict نماد — حکم خرید/نگهداری/فروش (مثال: /verdict وبملت)")
 
-PENDING = {}   # chat_id(str) → {"cmd":..., "ts":...}
+PENDING = {}
 
 def parse_cmd(text):
     t = text.strip()
@@ -664,12 +674,13 @@ def parse_cmd(text):
     if t == "/غربال": return "screen", ""
     if t in ("/cancel", "/لغو"): return "cancel", ""
     if t in ("/help", "/start"): return "help", ""
-    m = re.match(r"^/([a-eA-E])(?:\s+(.+))?$", t)
+    m = re.match(r"^/([A-Za-z]+)(?:\s+(.+))?$", t)
     if m:
+        name = m.group(1).lower()
         raw = (m.group(2) or "").strip().strip("«»'\"،, ")
         tokens = raw.split()
         arg = tokens[0] if tokens else ""
-        return CMD_MAP.get(m.group(1).lower()), arg
+        return CMD_MAP.get(name), arg
     return None, ""
 
 def run_simple(chat, cmd):
@@ -727,7 +738,6 @@ def handle_update(u):
             PENDING.pop(key, None)
             if not arg:
                 PENDING[key] = {"cmd": cmd, "ts": time.time()}
-                letter = CMD_LETTER[cmd]
                 send_to(chat, f"❗ نام نماد مورد نظر را وارد کنید (فقط نام نماد).\n"
                               f"مثال: فولاد\n\nبرای لغو: /cancel")
                 return True
@@ -740,7 +750,6 @@ def handle_update(u):
             return True
         return False
 
-    # پیام عادی: اگر در حالت انتظار نماد هستیم → به‌عنوان نماد اجرا کن
     p = PENDING.get(key)
     if p and (time.time() - p["ts"]) <= PENDING_TTL:
         sym = text.strip().strip("«»'\"،,()")
@@ -760,8 +769,7 @@ def handle_update(u):
         send_to(chat, "⌛ وقت وارد کردن نماد تمام شد؛ دوباره دستور را بفرستید.")
         return True
 
-    # پیام ناشناختهٔ عادی
-    send_to(chat, "🤖 برای شروع از دکمه‌های دستور استفاده کنید:\n/a سرخطی | /b غربالگری | /c /d /e + نام نماد")
+    send_to(chat, "🤖 برای شروع از دکمه‌های دستور استفاده کنید:\n/news سرخطی | /screen غربالگری | /chart /levels /verdict + نام نماد")
     return True
 
 def get_updates(offset=None, timeout=0):
