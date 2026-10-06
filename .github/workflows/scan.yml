@@ -1,3 +1,7 @@
+
+## 📄 فایل ۲: `scan.yml` — کامل، جایگزین کنید (گزینهٔ wisdom اضافه شد)
+
+```yaml
 name: daily-scan
 
 on:
@@ -11,6 +15,7 @@ on:
           - both
           - morning
           - afternoon
+          - wisdom
           - poll
 
 concurrency:
@@ -26,7 +31,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      # در poll فقط requests لازم است (سریع) — بقیهٔ حالت‌ها کل requirements
       - if: github.event.inputs.mode == 'poll'
         run: pip install -q requests
       - if: github.event.inputs.mode != 'poll'
