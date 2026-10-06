@@ -1,7 +1,3 @@
-
-## 📄 فایل ۲: `scan.yml` — کامل، جایگزین کنید (گزینهٔ wisdom اضافه شد)
-
-```yaml
 name: daily-scan
 
 on:
